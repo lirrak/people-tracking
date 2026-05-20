@@ -15,7 +15,7 @@ from serial_utils import list_serial_ports
 from config_sender import send_selected_config
 from uart_parser import AutoRadarUARTParser
 from filters import TrackHistory, GhostTargetFilter
-from pointcloud_processing import build_human_targets, HAS_SKLEARN
+from pointcloud_processing import build_human_targets, HAS_SKLEARN, TemporalPointCloudStabilizer
 from visualization import setup_3d_plot, update_3d_plot
 
 
@@ -38,6 +38,8 @@ def main():
     print(f"Human box      : {SHOW_HUMAN_BOX}")
     print(f"Ghost filter   : {ENABLE_GHOST_TARGET_FILTER}")
     print(f"Ghost max miss : {GHOST_MAX_MISSING_FRAMES} frames")
+    print(f"Confirm frames : {TARGET_CONFIRM_FRAMES}")
+    print(f"Smoothing      : {ENABLE_TARGET_SMOOTHING}")
     print(f"PC processor   : {ENABLE_POINTCLOUD_HUMAN_PROCESSOR}")
     print(f"DBSCAN backend : {'scikit-learn' if HAS_SKLEARN else 'fallback'}")
     print("===================================================")
@@ -61,6 +63,7 @@ def main():
 
     parser = AutoRadarUARTParser()
     track_history = TrackHistory(max_len=80, max_missing_frames=12)
+    pointcloud_stabilizer = TemporalPointCloudStabilizer()
     ghost_filter = GhostTargetFilter(
         max_missing_frames=GHOST_MAX_MISSING_FRAMES,
         min_support_points=GHOST_MIN_SUPPORT_POINTS,
@@ -68,7 +71,12 @@ def main():
         support_radius_y=GHOST_SUPPORT_RADIUS_Y,
         support_radius_z=GHOST_SUPPORT_RADIUS_Z,
         duplicate_distance_xy=GHOST_DUPLICATE_DISTANCE_XY,
-        drop_unsupported_immediately=GHOST_DROP_UNSUPPORTED_IMMEDIATELY
+        drop_unsupported_immediately=GHOST_DROP_UNSUPPORTED_IMMEDIATELY,
+        confirm_frames=TARGET_CONFIRM_FRAMES,
+        apply_confirmation_to_firmware_targets=APPLY_CONFIRMATION_TO_FIRMWARE_TARGETS,
+        enable_smoothing=ENABLE_TARGET_SMOOTHING,
+        smoothing_alpha=TARGET_SMOOTHING_ALPHA,
+        smoothing_reset_distance=TARGET_SMOOTHING_RESET_DISTANCE
     )
 
     fig, ax = setup_3d_plot()
@@ -111,17 +119,25 @@ def main():
                 raw_targets = frame["targets"]
                 target_index = frame.get("target_index", np.empty((0,), dtype=np.uint8))
 
+                if ENABLE_POINTCLOUD_TEMPORAL_STABILIZER:
+                    point_cloud_for_detection = pointcloud_stabilizer.update(
+                        point_cloud,
+                        frame_number=frame_number
+                    )
+                else:
+                    point_cloud_for_detection = point_cloud
+
                 cluster_debug = []
 
                 if ENABLE_POINTCLOUD_HUMAN_PROCESSOR:
                     candidate_targets, display_point_cloud, cluster_debug = build_human_targets(
                         raw_targets=raw_targets,
-                        point_cloud=point_cloud,
+                        point_cloud=point_cloud_for_detection,
                         target_index=target_index
                     )
                 else:
                     candidate_targets = raw_targets
-                    display_point_cloud = point_cloud
+                    display_point_cloud = point_cloud_for_detection
 
                 if ENABLE_GHOST_TARGET_FILTER:
                     targets = ghost_filter.update(
@@ -155,7 +171,8 @@ def main():
                     f"Header: {parser.last_header_mode} | "
                     f"TLV length: {parser.last_tlv_length_mode} | "
                     f"TLVs: {parser.last_tlv_types} | "
-                    f"Points: {len(point_cloud)} | "
+                    f"Raw points: {len(point_cloud)} | "
+                    f"Stable points: {len(point_cloud_for_detection)} | "
                     f"Display points: {len(display_point_cloud)} | "
                     f"Clusters: {len(cluster_debug)} | "
                     f"Targets: {len(targets)} | "
