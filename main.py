@@ -15,7 +15,7 @@ from serial_utils import list_serial_ports
 from config_sender import send_selected_config
 from uart_parser import AutoRadarUARTParser
 from filters import TrackHistory, GhostTargetFilter
-from pointcloud_processing import build_human_targets, HAS_SKLEARN, TemporalPointCloudStabilizer
+from pointcloud_processing import VirtualTargetTracker, HAS_SKLEARN, TemporalPointCloudStabilizer
 from visualization import setup_3d_plot, update_3d_plot
 
 
@@ -78,6 +78,7 @@ def main():
         smoothing_alpha=TARGET_SMOOTHING_ALPHA,
         smoothing_reset_distance=TARGET_SMOOTHING_RESET_DISTANCE
     )
+    virtual_tracker = VirtualTargetTracker()
 
     fig, ax = setup_3d_plot()
 
@@ -130,10 +131,11 @@ def main():
                 cluster_debug = []
 
                 if ENABLE_POINTCLOUD_HUMAN_PROCESSOR:
-                    candidate_targets, display_point_cloud, cluster_debug = build_human_targets(
+                    candidate_targets, display_point_cloud, cluster_debug = virtual_tracker.track_and_build(
                         raw_targets=raw_targets,
                         point_cloud=point_cloud_for_detection,
-                        target_index=target_index
+                        target_index=target_index,
+                        frame_number=frame_number
                     )
                 else:
                     candidate_targets = raw_targets

@@ -110,12 +110,14 @@ class GhostTargetFilter:
         self.last_seen_frame = {}
         self.confirm_count = {}
         self.smoothed_position = {}
+        self.last_target_state = {}  # Lưu trữ trạng thái cuối cùng của target đã confirm
 
     def reset(self):
         self.missing_count.clear()
         self.last_seen_frame.clear()
         self.confirm_count.clear()
         self.smoothed_position.clear()
+        self.last_target_state.clear()
 
     def count_support_points(self, target, point_cloud):
         if point_cloud is None or len(point_cloud) == 0:
@@ -252,16 +254,26 @@ class GhostTargetFilter:
         for target in sorted_targets:
             tx = target.get("posX", 0.0)
             ty = target.get("posY", 0.0)
+            tz = target.get("posZ", 0.0)
 
             is_duplicate = False
 
             for kept in kept_targets:
                 kx = kept.get("posX", 0.0)
                 ky = kept.get("posY", 0.0)
+                kz = kept.get("posZ", 0.0)
 
                 distance_xy = float(np.sqrt((tx - kx) ** 2 + (ty - ky) ** 2))
 
+                # Gộp trùng thông thường dựa trên khoảng cách cấu hình
                 if distance_xy < self.duplicate_distance_xy:
+                    is_duplicate = True
+                    break
+
+                # Gộp trùng thông minh do phản xạ sàn (Floor Reflection Merger)
+                # Nếu khoảng cách XY < 1.35m và có một target nằm sát sàn (Z < 0.05m)
+                is_floor_split = (distance_xy < 1.35) and (tz < 0.05 or kz < 0.05)
+                if is_floor_split:
                     is_duplicate = True
                     break
 
@@ -273,21 +285,6 @@ class GhostTargetFilter:
 
         return kept_targets
 
-    def cleanup_missing_ids(self, current_ids):
-        old_ids = set(self.missing_count.keys()) | set(self.confirm_count.keys()) | set(self.smoothed_position.keys())
-
-        for tid in list(old_ids):
-            if tid in current_ids:
-                continue
-
-            self.missing_count[tid] = self.missing_count.get(tid, 0) + 1
-
-            if self.missing_count[tid] > self.max_missing_frames:
-                self.missing_count.pop(tid, None)
-                self.last_seen_frame.pop(tid, None)
-                self.confirm_count.pop(tid, None)
-                self.smoothed_position.pop(tid, None)
-
     def update(self, targets, point_cloud, frame_number=None):
         if targets is None:
             targets = []
@@ -295,6 +292,7 @@ class GhostTargetFilter:
         filtered_targets = []
         current_ids = set()
 
+        # 1) Xử lý các target có mặt trong frame hiện tại
         for target in targets:
             target = dict(target)
             tid = target.get("tid", -1)
@@ -311,20 +309,50 @@ class GhostTargetFilter:
                 if self.is_confirmed(target, supported):
                     target = self.smooth_target(target)
                     filtered_targets.append(target)
+                    self.last_target_state[tid] = target.copy()  # Lưu lại trạng thái confirm tốt nhất
             else:
+                # Chỉ giữ lại target chập chờn nếu trước đó nó đã TỪNG được xác nhận thành công
+                was_previously_confirmed = (self.confirm_count.get(tid, 0) >= self.confirm_frames) or (not self.should_apply_confirmation(target))
+                
                 self.confirm_count[tid] = 0
                 self.missing_count[tid] = self.missing_count.get(tid, 0) + 1
                 target["missingFrames"] = self.missing_count[tid]
 
-                if not self.drop_unsupported_immediately:
+                if not self.drop_unsupported_immediately and was_previously_confirmed:
                     if self.missing_count[tid] <= self.max_missing_frames:
-                        # Vẫn giữ tạm target cũ nhưng dùng vị trí đã smooth nếu có.
                         target = self.smooth_target(target)
                         filtered_targets.append(target)
-                    else:
-                        self.smoothed_position.pop(tid, None)
+                        self.last_target_state[tid] = target.copy()
 
-        self.cleanup_missing_ids(current_ids)
+        # 2) Xử lý các target bị mất ID hoàn toàn khỏi frame hiện tại (Dead Reckoning)
+        for tid in list(self.last_target_state.keys()):
+            if tid not in current_ids:
+                self.missing_count[tid] = self.missing_count.get(tid, 0) + 1
+                
+                if not self.drop_unsupported_immediately and self.missing_count[tid] <= self.max_missing_frames:
+                    # Tái tạo target từ trạng thái đã confirm cuối cùng
+                    missing_target = self.last_target_state[tid].copy()
+                    missing_target["missingFrames"] = self.missing_count[tid]
+                    missing_target["ghostFiltered"] = True
+                    
+                    missing_target = self.smooth_target(missing_target)
+                    filtered_targets.append(missing_target)
+                else:
+                    # Đã quá thời hạn giữ khung -> Tiến hành xóa sạch trạng thái
+                    self.missing_count.pop(tid, None)
+                    self.last_seen_frame.pop(tid, None)
+                    self.confirm_count.pop(tid, None)
+                    self.smoothed_position.pop(tid, None)
+                    self.last_target_state.pop(tid, None)
+
+        # 3) Dọn dẹp trạng thái của các target chưa từng được confirm nhưng đã biến mất khỏi frame hiện tại
+        for tid in list(self.confirm_count.keys()):
+            if tid not in current_ids and tid not in self.last_target_state:
+                self.confirm_count.pop(tid, None)
+                self.missing_count.pop(tid, None)
+                self.last_seen_frame.pop(tid, None)
+                self.smoothed_position.pop(tid, None)
+
+        # 4) Lọc trùng và sắp xếp
         filtered_targets = self.remove_duplicates(filtered_targets)
-
         return filtered_targets

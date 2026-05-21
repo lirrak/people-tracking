@@ -615,6 +615,11 @@ def build_human_targets(raw_targets, point_cloud, target_index=None):
     for target in raw_targets:
         target = dict(target)
         tid = target.get("tid", -1)
+        tz = target.get("posZ", 0.0)
+
+        # Loại bỏ các target có vị trí tâm phi vật lý (như phản xạ sâu dưới sàn Z = -0.41m)
+        if tz < TARGET_ROI_Z[0] or tz > TARGET_ROI_Z[1]:
+            continue
 
         associated_points = empty_point_cloud()
 
@@ -700,3 +705,226 @@ def build_human_targets(raw_targets, point_cloud, target_index=None):
     display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud
 
     return final_targets, display_point_cloud, cluster_debug
+
+
+class VirtualTargetTracker:
+    """
+    Stateful tracker cho các target ảo sinh ra từ Point Cloud.
+    Giải quyết triệt để lỗi nhảy ID ngẫu nhiên của DBSCAN và lọc sạch vật thể tĩnh (bàn ghế).
+    """
+    def __init__(self):
+        self.next_virtual_id = VIRTUAL_TARGET_ID_BASE # 1000
+        self.active_targets = {} # tid -> { "center": np.array, "history_positions": [], "history_dopplers": [], "last_seen_frame": frame }
+
+    def reset(self):
+        self.next_virtual_id = VIRTUAL_TARGET_ID_BASE
+        self.active_targets.clear()
+
+    def track_and_build(self, raw_targets, point_cloud, target_index=None, frame_number=0):
+        """
+        Gom cụm điểm mây -> So khớp ID ổn định -> Lọc vật thể tĩnh -> Trả về final targets.
+        """
+        if raw_targets is None:
+            raw_targets = []
+
+        point_cloud = ensure_point_cloud_shape(point_cloud)
+        roi_points, roi_original_indices = filter_human_roi_with_indices(point_cloud)
+        clusters = cluster_pointcloud(roi_points)
+
+        final_targets = []
+        cluster_debug = []
+
+        # 1) Đánh giá và lọc target phần cứng (Firmware Targets)
+        for target in raw_targets:
+            target = dict(target)
+            tid = target.get("tid", -1)
+            tz = target.get("posZ", 0.0)
+
+            if tz < TARGET_ROI_Z[0] or tz > TARGET_ROI_Z[1]:
+                continue
+
+            associated_points = empty_point_cloud()
+
+            if USE_TARGET_INDEX_ASSOCIATION:
+                associated_points = points_from_target_index(point_cloud, target_index, tid)
+                associated_points = filter_human_roi(associated_points)
+                target["targetIndexPointCount"] = int(len(associated_points))
+
+            if len(associated_points) < GHOST_MIN_SUPPORT_POINTS:
+                associated_points = points_near_target(roi_points, target)
+                target["radiusSupportUsed"] = True
+            else:
+                target["radiusSupportUsed"] = False
+
+            score, features = score_human_cluster(associated_points)
+            target["supportPointCount"] = int(len(associated_points))
+            target["humanScore"] = score
+            target["clusterFeatures"] = features
+            target["source"] = "firmware_target"
+
+            if score >= HUMAN_SCORE_TARGET_THRESHOLD or len(associated_points) >= GHOST_MIN_SUPPORT_POINTS:
+                final_targets.append(target)
+
+        # 2) Xử lý đa mục tiêu ảo song song (Virtual Targets)
+        allow_virtual_targets = ENABLE_VIRTUAL_CLUSTER_TARGETS
+        if VIRTUAL_CLUSTER_ONLY_WHEN_NO_FIRMWARE_TARGETS and len(final_targets) > 0:
+            allow_virtual_targets = False
+
+        merged_clusters = merge_nearby_clusters(clusters)
+        virtual_candidates = []
+
+        # Dọn dẹp các target ảo đã biến mất quá lâu (> 15 frame) trong tracker
+        for tid in list(self.active_targets.keys()):
+            if frame_number - self.active_targets[tid]["last_seen_frame"] > 15:
+                self.active_targets.pop(tid, None)
+
+        cluster_centers = []
+        cluster_scores = []
+        cluster_features = []
+        cluster_point_counts = []
+        cluster_dopplers = []
+        valid_indices = []
+
+        for cid, cluster in enumerate(merged_clusters):
+            score, features = score_human_cluster(cluster)
+            cluster_center = np.mean(cluster[:, 0:3], axis=0)
+
+            cluster_debug.append({
+                "cluster_id": cid,
+                "point_count": int(len(cluster)),
+                "score": float(score),
+                "center": tuple(float(v) for v in cluster_center),
+                "features": features,
+                "merged": True,
+            })
+
+            if not allow_virtual_targets:
+                continue
+            if len(cluster) < VIRTUAL_CLUSTER_MIN_POINTS:
+                continue
+            if not features.get("is_shape_valid", False):
+                continue
+            if score < VIRTUAL_CLUSTER_SCORE_THRESHOLD:
+                continue
+
+            cluster_centers.append(cluster_center)
+            cluster_scores.append(score)
+            cluster_features.append(features)
+            cluster_point_counts.append(len(cluster))
+            cluster_dopplers.append(features.get("avg_motion", 0.0))
+            valid_indices.append(cid)
+
+        # Tiến hành so khớp không gian thời gian (Spatial Association Matcher)
+        matched_cluster_ids = set()
+        matched_tids = set()
+        assignments = {} # cluster_index -> tid
+
+        if self.active_targets and cluster_centers:
+            pairs = []
+            for c_idx, cc in enumerate(cluster_centers):
+                for tid, target_info in self.active_targets.items():
+                    tc = target_info["center"]
+                    dist_xy = float(np.sqrt((cc[0] - tc[0])**2 + (cc[1] - tc[1])**2))
+                    pairs.append((dist_xy, c_idx, tid))
+            
+            # Sắp xếp các cặp theo khoảng cách tăng dần
+            pairs.sort(key=lambda x: x[0])
+            
+            # Liên kết tham lam (Greedy Association)
+            for dist_xy, c_idx, tid in pairs:
+                if c_idx not in matched_cluster_ids and tid not in matched_tids:
+                    # Nếu nằm trong bán kính gộp cụm hợp lý, kế thừa ID
+                    if dist_xy <= VIRTUAL_CLUSTER_MERGE_DISTANCE_XY:
+                        matched_cluster_ids.add(c_idx)
+                        matched_tids.add(tid)
+                        assignments[c_idx] = tid
+
+        # Tạo target ảo từ các cụm đã gán ID ổn định
+        for c_idx, cc in enumerate(cluster_centers):
+            score = cluster_scores[c_idx]
+            features = cluster_features[c_idx]
+            pt_count = cluster_point_counts[c_idx]
+            avg_motion = cluster_dopplers[c_idx]
+            orig_cid = valid_indices[c_idx]
+
+            if c_idx in assignments:
+                tid = assignments[c_idx]
+                target_info = self.active_targets[tid]
+                target_info["center"] = cc
+                target_info["last_seen_frame"] = frame_number
+            else:
+                # Cấp phát ID mới duy nhất nếu xuất hiện cụm mới hoàn toàn
+                tid = self.next_virtual_id
+                self.next_virtual_id += 1
+                target_info = {
+                    "center": cc,
+                    "history_positions": [],
+                    "history_dopplers": [],
+                    "last_seen_frame": frame_number
+                }
+                self.active_targets[tid] = target_info
+
+            # Ghi nhận lịch sử vị trí và Doppler để phân tích vật thể tĩnh
+            target_info["history_positions"].append(cc[:2])
+            target_info["history_dopplers"].append(avg_motion)
+
+            if len(target_info["history_positions"]) > STATIC_CLUTTER_MIN_FRAMES:
+                target_info["history_positions"] = target_info["history_positions"][-STATIC_CLUTTER_MIN_FRAMES:]
+                target_info["history_dopplers"] = target_info["history_dopplers"][-STATIC_CLUTTER_MIN_FRAMES:]
+
+            # Áp dụng bộ lọc vật thể tĩnh
+            is_clutter = False
+            if ENABLE_STATIC_CLUTTER_FILTER and len(target_info["history_positions"]) >= STATIC_CLUTTER_MIN_FRAMES:
+                pos_history = np.array(target_info["history_positions"])
+                std_x = float(np.std(pos_history[:, 0]))
+                std_y = float(np.std(pos_history[:, 1]))
+                mean_doppler = float(np.mean(target_info["history_dopplers"]))
+
+                # Nếu biến thiên vị trí < 5cm và Doppler < 0.04m/s -> Nhiễu bàn ghế tĩnh
+                if std_x < STATIC_CLUTTER_MAX_STD and std_y < STATIC_CLUTTER_MAX_STD and mean_doppler < STATIC_CLUTTER_MAX_DOPPLER:
+                    is_clutter = True
+
+            if is_clutter:
+                continue # Bỏ qua, không đưa vật thể tĩnh vào danh sách target hiển thị
+
+            virtual_target = {
+                "tid": int(tid),
+                "posX": float(cc[0]),
+                "posY": float(cc[1]),
+                "posZ": float(cc[2]),
+                "velX": 0.0,
+                "velY": 0.0,
+                "velZ": 0.0,
+                "accX": 0.0,
+                "accY": 0.0,
+                "accZ": 0.0,
+                "isVirtual": True,
+                "source": "cluster",
+                "supportPointCount": int(pt_count),
+                "humanScore": score,
+                "clusterFeatures": features,
+            }
+
+            # Tránh tạo trùng hộp ảo nếu đã có target phần cứng ở sát bên
+            too_close_to_existing = False
+            for target in final_targets:
+                if target_xy_distance(virtual_target, target) < CLUSTER_TO_TARGET_MIN_DISTANCE_XY:
+                    too_close_to_existing = True
+                    break
+
+            if not too_close_to_existing:
+                virtual_candidates.append(virtual_target)
+
+        # Sắp xếp và giới hạn số lượng target ảo hiển thị song song
+        virtual_candidates.sort(
+            key=lambda t: (t.get("humanScore", 0.0), t.get("supportPointCount", 0)),
+            reverse=True
+        )
+
+        final_targets.extend(virtual_candidates[:VIRTUAL_CLUSTER_MAX_TARGETS])
+        final_targets.sort(key=lambda t: t.get("tid", 0))
+
+        display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud
+
+        return final_targets, display_point_cloud, cluster_debug
+
