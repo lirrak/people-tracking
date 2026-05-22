@@ -160,12 +160,16 @@ USE_TARGET_INDEX_ASSOCIATION = True
 # ID bắt đầu cho các target ảo sinh ra từ point cloud cluster.
 VIRTUAL_TARGET_ID_BASE = 1000
 
+# Khoảng cách tối đa giữa các frame để so khớp kế thừa ID ảo (mét).
+# Cho phép cụm mây điểm di chuyển linh hoạt vẫn giữ được đúng mã định danh cũ.
+VIRTUAL_TRACKER_ASSOCIATION_RADIUS = 1.30
+
 
 # ============================================================
 # STATIC CLUTTER FILTER SETTINGS (Version 4)
 # ============================================================
 ENABLE_STATIC_CLUTTER_FILTER = True
-STATIC_CLUTTER_MIN_FRAMES = 30
+STATIC_CLUTTER_MIN_FRAMES = 15       # Số frame để bắt đầu lọc vật thể tĩnh
 STATIC_CLUTTER_MAX_STD = 0.05       # Độ lệch chuẩn XY tối đa để coi là đứng im hoàn toàn (đồ vật)
 STATIC_CLUTTER_MAX_DOPPLER = 0.04   # Vận tốc Doppler trung bình tối đa của vật thể tĩnh (m/s)
 
@@ -207,7 +211,7 @@ ENABLE_GHOST_TARGET_FILTER = True
 
 # Cần bao nhiêu frame liên tiếp trước khi xác nhận target mới.
 # Tăng lên 3 nếu detect loạn. Giảm xuống 1 nếu người thật bị chậm hiện box.
-TARGET_CONFIRM_FRAMES = 2
+TARGET_CONFIRM_FRAMES = 4
 
 # Có áp dụng confirm frame cho firmware target không?
 # False: firmware target hiện nhanh hơn.
@@ -216,7 +220,7 @@ APPLY_CONFIRMATION_TO_FIRMWARE_TARGETS = True
 
 # Số frame giữ lại target khi không còn point cloud hỗ trợ.
 # Giảm xuống 2 hoặc 3 nếu box vẫn tồn tại quá lâu sau khi người rời đi.
-GHOST_MAX_MISSING_FRAMES = 2
+GHOST_MAX_MISSING_FRAMES = 5
 
 # Số point tối thiểu gần target để coi target còn thật.
 GHOST_MIN_SUPPORT_POINTS = 3

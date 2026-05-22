@@ -830,11 +830,13 @@ class VirtualTargetTracker:
             # Sắp xếp các cặp theo khoảng cách tăng dần
             pairs.sort(key=lambda x: x[0])
             
+            # Áp dụng bán kính so khớp liên khung độc lập để bảo toàn ID ổn định
+            assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS if 'VIRTUAL_TRACKER_ASSOCIATION_RADIUS' in globals() else VIRTUAL_CLUSTER_MERGE_DISTANCE_XY
+            
             # Liên kết tham lam (Greedy Association)
             for dist_xy, c_idx, tid in pairs:
                 if c_idx not in matched_cluster_ids and tid not in matched_tids:
-                    # Nếu nằm trong bán kính gộp cụm hợp lý, kế thừa ID
-                    if dist_xy <= VIRTUAL_CLUSTER_MERGE_DISTANCE_XY:
+                    if dist_xy <= assoc_radius:
                         matched_cluster_ids.add(c_idx)
                         matched_tids.add(tid)
                         assignments[c_idx] = tid
