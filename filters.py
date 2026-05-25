@@ -63,6 +63,59 @@ class TrackHistory:
 
 
 # ============================================================
+# MULTIPATH GHOST SUPPRESSION HELPER
+# ============================================================
+
+def suppress_multipath_ghosts(candidates):
+    """Quét và triệt tiêu các Ghost Target sinh ra do dội sóng gương qua tường."""
+    if len(candidates) <= 1:
+        return candidates
+        
+    # Sắp xếp các ứng viên theo Y tăng dần (gần radar trước, xa sau)
+    candidates = list(candidates)
+    candidates.sort(key=lambda t: t["posY"])
+    kept_candidates = []
+    
+    for target in candidates:
+        tx = target["posX"]
+        ty = target["posY"]
+        is_ghost = False
+        
+        # So sánh với các target thật ở gần radar hơn
+        for primary in kept_candidates:
+            px = primary["posX"]
+            py = primary["posY"]
+            
+            # Tính góc azimuth (radian) của từng target
+            angle_p = np.arctan2(px, py)
+            angle_t = np.arctan2(tx, ty)
+            
+            # Tính độ lệch góc nằm trong khoảng [-pi, pi]
+            angle_diff = (angle_t - angle_p + np.pi) % (2 * np.pi) - np.pi
+            
+            # Nếu nằm cùng góc quét Azimuth (lệch nhau ít < 10 độ = 0.1745 rad) nhưng khoảng cách xa hơn
+            same_angle = abs(angle_diff) < np.radians(10.0)
+            further_away = ty > py + 0.80
+            
+            if same_angle and further_away:
+                # Kiểm tra xem có phải dội gương (độ mạnh phản xạ thấp hơn nhiều target chính)
+                primary_pts = primary.get("supportPointCount", 10)
+                target_pts = target.get("supportPointCount", 0)
+                
+                is_virtual = target.get("isVirtual", False) or target.get("source") in ("cluster", "merged_cluster")
+                pts_ratio = 1.10 if is_virtual else 0.75
+                
+                if target_pts < primary_pts * pts_ratio:
+                    is_ghost = True
+                    break
+                    
+        if not is_ghost:
+            kept_candidates.append(target)
+            
+    return kept_candidates
+
+
+# ============================================================
 # GHOST TARGET FILTER
 # ============================================================
 
@@ -355,4 +408,20 @@ class GhostTargetFilter:
 
         # 4) Lọc trùng và sắp xếp
         filtered_targets = self.remove_duplicates(filtered_targets)
-        return filtered_targets
+
+        # 5) Triệt tiêu Ghost Target đa đường và đồng bộ hóa trạng thái
+        final_targets = suppress_multipath_ghosts(filtered_targets)
+
+        # Nếu có target nào bị loại bỏ ở bước này, ta phải xóa sạch trạng thái của nó
+        # để Dead Reckoning không cố hồi sinh nó ở frame tiếp theo
+        kept_ids = {t["tid"] for t in final_targets}
+        for target in filtered_targets:
+            tid = target["tid"]
+            if tid not in kept_ids:
+                self.missing_count.pop(tid, None)
+                self.last_seen_frame.pop(tid, None)
+                self.confirm_count.pop(tid, None)
+                self.smoothed_position.pop(tid, None)
+                self.last_target_state.pop(tid, None)
+
+        return final_targets

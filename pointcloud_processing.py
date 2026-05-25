@@ -54,6 +54,53 @@ def ensure_point_cloud_shape(points):
 
 
 # ============================================================
+# TILT CALIBRATION & COORDINATE TRANSFORMATION
+# ============================================================
+
+def transform_to_room_coordinates(points):
+    """Transform radar points to flat room coordinates if enabled."""
+    if not (ENABLE_COORD_TRANSFORM if 'ENABLE_COORD_TRANSFORM' in globals() else False):
+        return points
+    
+    points = ensure_point_cloud_shape(points)
+    if len(points) == 0:
+        return points
+        
+    theta_deg = RADAR_TILT_ANGLE_DEG if 'RADAR_TILT_ANGLE_DEG' in globals() else 30.0
+    h = RADAR_MOUNT_HEIGHT_M if 'RADAR_MOUNT_HEIGHT_M' in globals() else 0.60
+    theta = np.radians(theta_deg)
+    
+    transformed = points.copy()
+    y_radar = points[:, 1]
+    z_radar = points[:, 2]
+    
+    # Rotation around X-axis (pitch) and translation along Z (mount height)
+    transformed[:, 1] = y_radar * np.cos(theta) - z_radar * np.sin(theta)
+    transformed[:, 2] = y_radar * np.sin(theta) + z_radar * np.cos(theta) + h
+    
+    return transformed
+
+
+def transform_target_to_room_coordinates(target):
+    """Transform a firmware target's coordinates to room coordinates."""
+    if not (ENABLE_COORD_TRANSFORM if 'ENABLE_COORD_TRANSFORM' in globals() else False):
+        return target
+        
+    theta_deg = RADAR_TILT_ANGLE_DEG if 'RADAR_TILT_ANGLE_DEG' in globals() else 30.0
+    h = RADAR_MOUNT_HEIGHT_M if 'RADAR_MOUNT_HEIGHT_M' in globals() else 0.60
+    theta = np.radians(theta_deg)
+    
+    transformed = dict(target)
+    y_radar = target.get("posY", 0.0)
+    z_radar = target.get("posZ", 0.0)
+    
+    transformed["posY"] = float(y_radar * np.cos(theta) - z_radar * np.sin(theta))
+    transformed["posZ"] = float(y_radar * np.sin(theta) + z_radar * np.cos(theta) + h)
+    
+    return transformed
+
+
+# ============================================================
 # ROI + QUALITY FILTER
 # ============================================================
 
@@ -178,6 +225,70 @@ def _fallback_dbscan_labels(xyz, eps=0.45, min_samples=3):
     return labels
 
 
+def _adaptive_dbscan_labels(xyz, base_eps=0.20, k=0.06, min_samples=3):
+    """Range-adaptive DBSCAN implementation where eps scales with target cự ly."""
+    n = len(xyz)
+    labels = np.full(n, -1, dtype=np.int32)
+
+    if n == 0:
+        return labels
+
+    visited = np.zeros(n, dtype=bool)
+    cluster_id = 0
+
+    def region_query(index):
+        pt = xyz[index]
+        # Khoảng cách nằm ngang R = sqrt(X^2 + Y^2)
+        r = float(np.sqrt(pt[0]**2 + pt[1]**2))
+        adaptive_eps = base_eps + k * r
+        
+        diff = xyz - pt
+        dist = np.sqrt(np.sum(diff * diff, axis=1))
+        return np.where(dist <= adaptive_eps)[0]
+
+    for i in range(n):
+        if visited[i]:
+            continue
+
+        visited[i] = True
+        neighbors = list(region_query(i))
+
+        if len(neighbors) < min_samples:
+            labels[i] = -1
+            continue
+
+        labels[i] = cluster_id
+        j = 0
+
+        while j < len(neighbors):
+            p = neighbors[j]
+
+            if not visited[p]:
+                visited[p] = True
+                p_neighbors = list(region_query(p))
+
+                if len(p_neighbors) >= min_samples:
+                    for item in p_neighbors:
+                        if item not in neighbors:
+                            neighbors.append(item)
+
+            if labels[p] == -1:
+                labels[p] = cluster_id
+
+            j += 1
+
+        cluster_id += 1
+
+    return labels
+
+
+def get_dynamic_min_points(range_r):
+    """Tính toán số điểm tối thiểu của cụm người thật thích nghi theo khoảng cách R (mét)."""
+    # Công thức: N_min = max(5, round(18 - 2.5 * R))
+    min_pts = int(np.round(18.0 - 2.5 * range_r))
+    return max(5, min_pts)
+
+
 def cluster_pointcloud(points, eps=None, min_samples=None, min_points=None):
     """Cluster ROI point cloud and return a list of point arrays."""
     if eps is None:
@@ -189,15 +300,23 @@ def cluster_pointcloud(points, eps=None, min_samples=None, min_points=None):
 
     points = ensure_point_cloud_shape(points)
 
+    # Lọc sơ bộ số điểm tối thiểu
     if len(points) < min_points:
         return []
 
     xyz = points[:, 0:3]
 
-    if HAS_SKLEARN:
-        labels = SklearnDBSCAN(eps=eps, min_samples=min_samples).fit_predict(xyz)
+    use_adaptive = ENABLE_ADAPTIVE_DBSCAN if 'ENABLE_ADAPTIVE_DBSCAN' in globals() else False
+
+    if use_adaptive:
+        base_eps = DBSCAN_BASE_EPS if 'DBSCAN_BASE_EPS' in globals() else 0.20
+        k = DBSCAN_RANGE_SCALE_K if 'DBSCAN_RANGE_SCALE_K' in globals() else 0.06
+        labels = _adaptive_dbscan_labels(xyz, base_eps=base_eps, k=k, min_samples=min_samples)
     else:
-        labels = _fallback_dbscan_labels(xyz, eps=eps, min_samples=min_samples)
+        if HAS_SKLEARN:
+            labels = SklearnDBSCAN(eps=eps, min_samples=min_samples).fit_predict(xyz)
+        else:
+            labels = _fallback_dbscan_labels(xyz, eps=eps, min_samples=min_samples)
 
     clusters = []
 
@@ -207,7 +326,14 @@ def cluster_pointcloud(points, eps=None, min_samples=None, min_points=None):
 
         cluster = points[labels == label]
 
-        if len(cluster) >= min_points:
+        # Tính toán cự ly ngang từ radar đến tâm cụm
+        center = np.mean(cluster[:, 0:3], axis=0)
+        range_r = float(np.sqrt(center[0]**2 + center[1]**2))
+        
+        # Áp dụng bộ lọc mật độ điểm động thích nghi khoảng cách
+        dynamic_min = get_dynamic_min_points(range_r)
+
+        if len(cluster) >= dynamic_min:
             clusters.append(cluster)
 
     return clusters
@@ -602,6 +728,10 @@ def build_human_targets(raw_targets, point_cloud, target_index=None):
     if raw_targets is None:
         raw_targets = []
 
+    # Transform coordinates to flat room coordinates if enabled
+    point_cloud = transform_to_room_coordinates(point_cloud)
+    raw_targets = [transform_target_to_room_coordinates(t) for t in raw_targets]
+
     point_cloud = ensure_point_cloud_shape(point_cloud)
     roi_points, roi_original_indices = filter_human_roi_with_indices(point_cloud)
     clusters = cluster_pointcloud(roi_points)
@@ -700,11 +830,64 @@ def build_human_targets(raw_targets, point_cloud, target_index=None):
     )
 
     final_targets.extend(virtual_candidates[:VIRTUAL_CLUSTER_MAX_TARGETS])
+    
+    # Triệt tiêu các Ghost Target sinh ra do dội sóng đa đường
+    final_targets = suppress_multipath_ghosts(final_targets)
+    
     final_targets.sort(key=lambda t: t.get("tid", 0))
 
     display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud
 
     return final_targets, display_point_cloud, cluster_debug
+
+
+def suppress_multipath_ghosts(candidates):
+    """Quét và triệt tiêu các Ghost Target sinh ra do dội sóng gương qua tường."""
+    if len(candidates) <= 1:
+        return candidates
+        
+    # Sắp xếp các ứng viên theo Y tăng dần (gần radar trước, xa sau)
+    candidates = list(candidates)
+    candidates.sort(key=lambda t: t["posY"])
+    kept_candidates = []
+    
+    for target in candidates:
+        tx = target["posX"]
+        ty = target["posY"]
+        is_ghost = False
+        
+        # So sánh với các target thật ở gần radar hơn
+        for primary in kept_candidates:
+            px = primary["posX"]
+            py = primary["posY"]
+            
+            # Tính góc azimuth (radian) của từng target
+            angle_p = np.arctan2(px, py)
+            angle_t = np.arctan2(tx, ty)
+            
+            # Tính độ lệch góc nằm trong khoảng [-pi, pi]
+            angle_diff = (angle_t - angle_p + np.pi) % (2 * np.pi) - np.pi
+            
+            # Nếu nằm cùng góc quét Azimuth (lệch nhau ít < 10 độ = 0.1745 rad) nhưng khoảng cách xa hơn
+            same_angle = abs(angle_diff) < np.radians(10.0)
+            further_away = ty > py + 0.80
+            
+            if same_angle and further_away:
+                # Kiểm tra xem có phải dội gương (độ mạnh phản xạ thấp hơn nhiều target chính)
+                primary_pts = primary.get("supportPointCount", 10)
+                target_pts = target.get("supportPointCount", 0)
+                
+                is_virtual = target.get("isVirtual", False) or target.get("source") in ("cluster", "merged_cluster")
+                pts_ratio = 1.10 if is_virtual else 0.75
+                
+                if target_pts < primary_pts * pts_ratio:
+                    is_ghost = True
+                    break
+                    
+        if not is_ghost:
+            kept_candidates.append(target)
+            
+    return kept_candidates
 
 
 class VirtualTargetTracker:
@@ -726,6 +909,10 @@ class VirtualTargetTracker:
         """
         if raw_targets is None:
             raw_targets = []
+
+        # Transform coordinates to flat room coordinates if enabled
+        point_cloud = transform_to_room_coordinates(point_cloud)
+        raw_targets = [transform_target_to_room_coordinates(t) for t in raw_targets]
 
         point_cloud = ensure_point_cloud_shape(point_cloud)
         roi_points, roi_original_indices = filter_human_roi_with_indices(point_cloud)
@@ -924,6 +1111,10 @@ class VirtualTargetTracker:
         )
 
         final_targets.extend(virtual_candidates[:VIRTUAL_CLUSTER_MAX_TARGETS])
+        
+        # Triệt tiêu các Ghost Target sinh ra do dội sóng đa đường
+        final_targets = suppress_multipath_ghosts(final_targets)
+        
         final_targets.sort(key=lambda t: t.get("tid", 0))
 
         display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud

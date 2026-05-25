@@ -98,6 +98,13 @@ MAX_POINT_SNR = 300.0
 ENABLE_DOPPLER_OUTLIER_FILTER = True
 MAX_ABS_DOPPLER = 4.0
 
+# ============================================================
+# RADAR INSTALLATION & COORDINATE TRANSFORMATION
+# ============================================================
+ENABLE_COORD_TRANSFORM = True
+RADAR_TILT_ANGLE_DEG = 30.0   # Góc nghiêng chĩa xuống của radar (độ)
+RADAR_MOUNT_HEIGHT_M = 0.60   # Chiều cao lắp đặt radar so với mặt đất (mét)
+
 # DBSCAN clustering.
 # eps nhỏ hơn giúp tách người gần nhau tốt hơn nhưng có thể làm cụm bị vỡ.
 # eps lớn hơn giúp gom point cloud thưa nhưng dễ gộp 2 người thành 1.
@@ -105,12 +112,19 @@ CLUSTER_EPS = 0.50
 CLUSTER_MIN_SAMPLES = 3
 CLUSTER_MIN_POINTS = 3
 
+# ============================================================
+# ADAPTIVE DBSCAN CLUSTERING SETTINGS
+# ============================================================
+ENABLE_ADAPTIVE_DBSCAN = True
+DBSCAN_BASE_EPS = 0.20        # Bán kính tối thiểu ở khoảng cách gần (mét)
+DBSCAN_RANGE_SCALE_K = 0.06   # Hệ số giãn nở bán kính theo khoảng cách R (eps = base + k*R)
+
 # Điều kiện hình học cơ bản của một cụm giống người.
 # Các giá trị này giúp loại bỏ nhiễu sàn / cạnh bàn / mảng tường.
-HUMAN_CLUSTER_MIN_HEIGHT_Z = 0.08
+HUMAN_CLUSTER_MIN_HEIGHT_Z = 0.45           # Nâng lên 45cm để loại bỏ các cụm nhiễu bẹt dưới sàn nhà
 HUMAN_CLUSTER_MAX_HEIGHT_Z = 2.20
 HUMAN_CLUSTER_MIN_WIDTH_X = 0.05
-HUMAN_CLUSTER_MAX_WIDTH_X = 1.50
+HUMAN_CLUSTER_MAX_WIDTH_X = 1.10            # Thu hẹp để tránh gộp nhầm mảng vách tường phản xạ
 HUMAN_CLUSTER_MAX_DEPTH_Y = 1.60
 HUMAN_CLUSTER_MIN_CENTER_Z = 0.08
 HUMAN_CLUSTER_MAX_CENTER_Z = 1.80
@@ -139,11 +153,11 @@ VIRTUAL_CLUSTER_ONLY_WHEN_NO_FIRMWARE_TARGETS = False
 # Gộp nhiều cluster nhỏ trên cùng một cơ thể thành 1 người.
 # Tăng lên 1.20 nếu 1 người vẫn bị tách nhiều box.
 # Giảm xuống 0.70 nếu nhiều người đứng gần nhau bị gộp.
-VIRTUAL_CLUSTER_MERGE_DISTANCE_XY = 0.85
+VIRTUAL_CLUSTER_MERGE_DISTANCE_XY = 1.15    # Tăng từ 0.85m lên 1.15m để gộp cụm thân/đầu/chân tốt hơn
 
 # Sau khi gộp cluster, cụm phải đủ điểm và đủ score mới tạo box ảo.
-VIRTUAL_CLUSTER_MIN_POINTS = 2
-VIRTUAL_CLUSTER_SCORE_THRESHOLD = 52.0
+VIRTUAL_CLUSTER_MIN_POINTS = 5              # Nâng từ 2 lên 5 để tránh tạo box từ lốm đốm nhiễu 2-3 điểm
+VIRTUAL_CLUSTER_SCORE_THRESHOLD = 72.0       # Nâng từ 52.0 lên 72.0 để tránh các ghost box yếu
 
 # Giới hạn số virtual target tối đa để tránh loạn khi point cloud nhiễu.
 VIRTUAL_CLUSTER_MAX_TARGETS = 3
