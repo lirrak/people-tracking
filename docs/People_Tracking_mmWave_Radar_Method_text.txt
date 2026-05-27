@@ -1,0 +1,259 @@
+PEOPLE TRACKING BẰNG 60GHz mmWave RADAR
+Tổng hợp method từ point cloud đến tracking ổn định
+Phạm vi tài liệu: chỉ tập trung vào People Tracking. Không bao gồm posture recognition, chest localization và vital sign.
+Mục tiêu: Biến point cloud mmWave radar thưa và nhiễu thành kết quả people tracking ổn định: số người, ID, vị trí 3D, vận tốc, confidence và bounding box.
+
+Mục lục
+1. Nguyên tắc quan trọng nhất
+2. Layer 1 - Point cloud input
+3. Layer 2 - Coordinate transform
+4. Layer 3 - Point filtering
+5. Layer 4 - Temporal aggregation
+6. Layer 5 - Clustering bằng Adaptive DBSCAN
+7. Layer 6 - Cluster validation
+8. Layer 7 - Centroid và bounding box
+9. Layer 8 - Kalman tracking
+10. Layer 9 - Data association
+11. Layer 10 - Track management
+12. Logic xử lý các lỗi thường gặp
+13. Cấu hình tham số ban đầu nên thử
+14. MVP people tracking nên làm theo 4 bước
+15. Kiến trúc code đề xuất
+
+1. Nguyên tắc quan trọng nhất
+Point cloud radar không xử lý giống LiDAR. Với LiDAR, có thể dùng rất nhiều điểm để dựng hình dạng vật thể. Với mmWave radar, point cloud thường thưa, nhiễu và thay đổi theo từng frame, nên cần tracking theo thời gian thay vì tin từng frame riêng lẻ.
+Không tin 1 frame đơn lẻ.Không tạo người mới quá dễ.Không xóa người quá chậm.Không lấy toàn bộ point cloud.Không chỉ dùng DBSCAN một mình.Phải có Kalman + track management.
+
+Thiết kế tốt nhất cho phase hiện tại là: point cloud -> filtering -> clustering -> tracking -> stable ID/box. Chưa cần posture, chest, heart rate hay breath rate.
+Radar UART / TLV-> parse point cloud-> filter point cloud-> cluster points-> track clusters-> manage track lifecycle-> output people tracking result
+
+2. Layer 1 - Point cloud input
+Từ radar, mỗi point nên được chuẩn hóa thành một cấu trúc thống nhất. Mục tiêu là tách rõ dữ liệu input khỏi thuật toán tracking, giúp dễ thay đổi firmware hoặc parser sau này.
+point = {    "x": float,    "y": float,    "z": float,    "velocity": float,    "snr": float,    "noise": float,    "intensity": float}
+
+Trường dữ liệu
+Ý nghĩa trong people tracking
+x
+Vị trí trái/phải so với radar hoặc trong hệ tọa độ phòng sau transform.
+y
+Khoảng cách phía trước radar; thường là trục quan trọng nhất để ước lượng range.
+z
+Chiều cao tương đối; dùng để lọc sàn/trần và hỗ trợ bounding box, chưa dùng để posture.
+velocity
+Vận tốc radial/Doppler; hỗ trợ phân biệt điểm động với clutter tĩnh.
+snr
+Độ tin cậy tín hiệu; dùng để loại điểm yếu hoặc noise.
+noise
+Mức nhiễu nền nếu firmware cung cấp; dùng để lọc point chất lượng kém.
+intensity
+Độ mạnh phản xạ; dùng bổ sung khi SNR/noise không đủ ổn định.
+
+Lưu ý: Ở phase people tracking, trục Z vẫn cần thiết để lọc điểm và vẽ bounding box, nhưng chưa dùng để nhận dạng tư thế người.
+
+3. Layer 2 - Coordinate transform
+Nếu radar đặt thẳng và hệ tọa độ đã đúng, có thể sử dụng trực tiếp X/Y/Z. Nếu radar đặt nghiêng, đặt cao, hoặc chĩa xuống sàn, cần transform tọa độ trước khi ROI filtering và tracking.
+Radar coordinate-> rotate theo góc tilt-> cộng offset chiều cao radar-> room coordinate
+
+Sau transform, nên quy ước: X là trái/phải, Y là khoảng cách trước radar, Z là chiều cao so với sàn. Nếu không transform, các lỗi có thể xảy ra: người thật bị loại khỏi ROI, sàn bị nhận nhầm thành point người, Z bị âm hoặc quá cao, bounding box bị lệch.
+# Ví dụ ý tưởng khi radar pitch xuống với góc theta và cao hY_room = Y_radar * cos(theta) - Z_radar * sin(theta)Z_room = Y_radar * sin(theta) + Z_radar * cos(theta) + h
+
+4. Layer 3 - Point filtering
+Đây là bước rất quan trọng. Không nên đưa toàn bộ point cloud vào DBSCAN, vì radar point cloud chứa nhiều ghost point, multipath và static reflection.
+4.1. ROI filter
+Chỉ giữ điểm trong vùng radar cần quan sát. Bộ ROI ban đầu có thể dùng như sau, sau đó tinh chỉnh theo phòng và góc đặt radar.
+ROI_X = (-2.0, 2.0)   # trái/phảiROI_Y = (0.3, 4.0)    # trước radarROI_Z = (0.0, 2.2)    # chiều cao người
+
+4.2. SNR filter
+Chỉ giữ point có SNR đủ tốt. Tuy nhiên không nên đặt ngưỡng SNR quá cao, vì người ở xa radar sẽ có ít điểm và SNR thấp hơn.
+if y < 1.5:    SNR_MIN = 6else:    SNR_MIN = 4
+
+4.3. Noise filter
+Nếu firmware trả về noise hoặc intensity, có thể dùng để loại các point chất lượng kém. Nên dùng kết hợp, không nên chỉ dựa vào một chỉ số duy nhất.
+if point.noise > NOISE_MAX:    reject(point)# hoặcif point.snr / (point.noise + epsilon) < threshold:    reject(point)
+
+4.4. Doppler / velocity filter
+Doppler rất hữu ích để phân biệt người đang di chuyển với clutter tĩnh. Tuy nhiên không được loại toàn bộ velocity gần 0, vì người đứng yên cũng có velocity gần 0.
+Nếu point velocity gần 0 và không thuộc track nào:    có thể là static clutterNếu point velocity gần 0 nhưng nằm gần confirmed track:    vẫn giữ, vì người có thể đang đứng yên
+
+Nguyên tắc velocity: Dùng Doppler để hỗ trợ lọc và association, không dùng Doppler như điều kiện tuyệt đối để quyết định có người hay không.
+
+5. Layer 4 - Temporal aggregation
+Point cloud radar thường thưa và nhấp nháy. Gom nhẹ nhiều frame liên tiếp trước khi clustering giúp tăng mật độ điểm và giảm lỗi mất cụm trong một frame.
+Frame hiện tại+ frame trước đó+ frame trước đó nữa-> aggregated point cloudAGGREGATION_FRAMES = 3
+
+Lợi ích
+Rủi ro
+Tăng mật độ point cloud và giúp DBSCAN ổn định hơn.
+Tăng độ trễ nhẹ.
+Giảm lỗi mất cụm trong một frame đơn lẻ.
+Nếu gom quá nhiều frame, có thể tạo bóng mờ khi người di chuyển nhanh.
+
+Khuyến nghị: Bắt đầu với 2-3 frame. Không nên gom quá nhiều frame trong phase real-time demo.
+
+6. Layer 5 - Clustering bằng Adaptive DBSCAN
+DBSCAN phù hợp với radar point cloud vì không cần biết trước số người, có khả năng gom các điểm gần nhau thành cluster và tách noise point.
+6.1. Vì sao không dùng eps cố định?
+Mật độ point cloud thay đổi theo khoảng cách. Người gần radar thường có nhiều điểm hơn, người xa radar có point cloud thưa hơn. Nếu eps cố định: eps quá nhỏ sẽ tách một người thành nhiều cụm; eps quá lớn sẽ gộp nhiều người thành một cụm.
+6.2. Adaptive eps theo range
+def get_dbscan_eps(y):    if y < 1.5:        return 0.25    elif y < 3.0:        return 0.35    else:        return 0.50
+
+Khoảng cách Y
+eps đề xuất
+Ghi chú
+0.5 - 1.5 m
+0.25 m
+Người gần radar, point cloud dày hơn.
+1.5 - 3.0 m
+0.35 m
+Vùng hoạt động chính, cần cân bằng tách/gộp.
+3.0 - 5.0 m
+0.45 - 0.50 m
+Người xa radar, point cloud thưa hơn.
+
+7. Layer 6 - Cluster validation
+Sau DBSCAN, không nên xem mọi cluster là người. Mỗi cluster cần qua bước kiểm tra chất lượng trước khi đưa vào tracker.
+Tiêu chí
+Ý nghĩa
+point_count
+Cluster có đủ số điểm hay chỉ là noise lẻ loi.
+avg_snr
+Tín hiệu trung bình có đủ mạnh hay không.
+width/depth/height
+Kích thước cluster có hợp lý với người hay không.
+position in ROI
+Cluster có nằm trong vùng quan sát hợp lý hay không.
+distance to prediction
+Cluster có gần prediction của track cũ hay không.
+
+MIN_POINTS_CLUSTER = 3MIN_AVG_SNR = 5MAX_CLUSTER_WIDTH = 1.5MAX_CLUSTER_DEPTH = 1.5MAX_CLUSTER_HEIGHT = 2.2
+
+Cluster đáng tin
+Cluster đáng nghi
+point_count >= 3, avg_snr tốt, centroid nằm trong ROI, spread hợp lý, tồn tại nhiều frame.
+chỉ có 1-2 point, xuất hiện 1 frame rồi mất, SNR thấp, nằm sát tường/sàn, velocity bất thường.
+
+8. Layer 7 - Centroid và bounding box
+Sau khi có cluster hợp lệ, tính centroid và các thông số của cluster. Tuy nhiên bounding box radar không nên vẽ quá sát point cloud vì point cloud rất thưa và có thể nhảy theo từng frame.
+centroid_x = mean(x)centroid_y = mean(y)centroid_z = mean(z)x_min, x_max = min(x), max(x)y_min, y_max = min(y), max(y)z_min, z_max = min(z), max(z)avg_snr = mean(snr)avg_velocity = mean(velocity)point_count = len(cluster)
+
+Box hiển thị: Nên lấy center từ Kalman track và làm mượt box size theo thời gian. Box chỉ cần đại diện cho người, chưa cần chính xác như skeleton.
+
+box_width  = 0.6box_depth  = 0.6box_height = 1.7
+
+9. Layer 8 - Kalman tracking
+Kalman tracking là phần giúp hệ thống ổn định. Nếu chỉ clustering từng frame, box sẽ dễ bị nhảy, mất, tạo ID mới liên tục hoặc giữ box ảo sau khi người rời đi.
+State đề xuất:[x, y, z, vx, vy, vz]Mỗi frame:Predict   -> dự đoán vị trí người ở frame tiếp theoAssociate -> gán cluster mới với track cũUpdate    -> nếu cluster khớp, cập nhật trackMiss      -> nếu không có cluster, tăng miss_countDelete    -> nếu miss_count quá cao, xóa track
+
+Mô hình cơ bản là constant velocity: vị trí mới bằng vị trí cũ cộng vận tốc nhân với delta time. Đây là đủ tốt cho MVP people tracking.
+x_new = x_old + vx * dty_new = y_old + vy * dtz_new = z_old + vz * dt
+
+10. Layer 9 - Data association
+Khi có nhiều người, cần gán cluster hiện tại với track cũ. Ban đầu có thể dùng nearest neighbor kết hợp distance gate. Khi số người tăng lên, nên nâng cấp lên Hungarian assignment hoặc Mahalanobis distance.
+MAX_ASSOCIATION_DISTANCE = 0.8Nếu distance(cluster_centroid, predicted_track_position) < MAX_ASSOCIATION_DISTANCE:    gán cluster cho trackelse:    tạo tentative track mới
+
+Phương pháp
+Khi nào dùng
+Nearest neighbor + distance gate
+MVP, ít người, dễ code, đủ tốt để bắt đầu.
+Hungarian assignment
+Nhiều track và nhiều cluster, cần gán tối ưu toàn cục.
+Mahalanobis distance
+Khi muốn tính đến covariance/uncertainty của Kalman.
+JPDA/JIPDA
+Môi trường phức tạp, multi-target tracking nâng cao.
+
+11. Layer 10 - Track management
+Track management quyết định hệ thống có ổn định hay không. Mỗi track nên có trạng thái Tentative, Confirmed và Deleted.
+Trạng thái
+Ý nghĩa
+Hành vi
+Tentative
+Cluster mới xuất hiện nhưng chưa chắc là người.
+Chưa hiển thị box hoặc hiển thị mờ trong debug.
+Confirmed
+Track đã tồn tại đủ số frame và đủ tin cậy.
+Hiển thị box, ID, position, velocity.
+Deleted
+Track mất detection quá lâu hoặc confidence quá thấp.
+Xóa khỏi danh sách track.
+
+if hit_count < 3:    state = "tentative"if hit_count >= 3:    state = "confirmed"if miss_count > 8:    delete_track()
+
+Khuyến nghị: Chỉ confirmed track mới được tính là people_count. Không nên vẽ box chính thức cho tentative track.
+
+12. Logic xử lý các lỗi thường gặp
+Lỗi
+Nguyên nhân thường gặp
+Cách xử lý
+Point cloud quá thưa
+SNR threshold cao, người xa radar, CFAR/config quá gắt, clutter removal loại nhầm.
+Giảm SNR threshold, gom 2-3 frame, adaptive DBSCAN, giữ confirmed track trong vài frame khi mất point.
+Detect một người thành nhiều box
+eps quá nhỏ, point cloud bị vỡ, min_samples quá thấp, track mới tạo quá dễ.
+Tăng eps, merge cluster gần nhau, tăng confirm_frames, không hiển thị tentative track.
+Nhiều người bị gộp thành một box
+eps quá lớn, hai người đứng quá gần, góc phân giải radar không đủ.
+Giảm eps vùng gần, dùng velocity để tách, dùng track prediction, không merge nếu đã có 2 confirmed tracks trước đó.
+Người đi rồi box vẫn còn
+miss threshold quá cao, nhiễu update vào track cũ, confidence không giảm.
+Giảm max_missed_frames, không update bằng cluster yếu, confidence decay nhanh hơn.
+Người đứng yên bị mất
+velocity filter quá mạnh, static clutter removal loại nhầm người, point cloud đứng yên ít.
+Không loại velocity gần 0 nếu gần confirmed track, dùng track memory, dùng SNR và vị trí thay vì chỉ Doppler.
+
+13. Cấu hình tham số ban đầu nên thử
+Bộ tham số dưới đây là baseline để thử nghiệm. Cần tinh chỉnh theo phòng, góc đặt radar, firmware, frame rate và khoảng cách người dùng.
+# ROIROI_X = (-2.0, 2.0)ROI_Y = (0.3, 4.0)ROI_Z = (0.0, 2.2)# FilteringSNR_MIN_NEAR = 6.0SNR_MIN_FAR = 4.0MAX_ABS_VELOCITY = 3.0# TemporalAGGREGATION_FRAMES = 3# DBSCANEPS_NEAR = 0.25EPS_MID = 0.35EPS_FAR = 0.50MIN_SAMPLES = 3# Cluster validationMIN_POINTS_CLUSTER = 3MIN_AVG_SNR = 5.0MAX_CLUSTER_WIDTH = 1.5MAX_CLUSTER_DEPTH = 1.5MAX_CLUSTER_HEIGHT = 2.2# TrackingTRACK_CONFIRM_FRAMES = 3TRACK_DELETE_MISSED_FRAMES = 8MAX_ASSOCIATION_DISTANCE = 0.8# ConfidenceCONFIRM_CONFIDENCE = 3DELETE_CONFIDENCE = 0
+
+14. MVP people tracking nên làm theo 4 bước
+Bước
+Mục tiêu
+Kết quả cần đạt
+1. Parse và hiển thị point cloud
+Đọc UART, parse TLV, hiển thị X/Y/Z, velocity và SNR.
+Biết radar đang trả về point cloud đúng hay không.
+2. Filtering + clustering
+Lọc point cloud, chạy DBSCAN, vẽ cluster centroid.
+Nhìn được vùng người thay vì điểm rời rạc.
+3. Kalman tracking
+Gán ID và track centroid qua thời gian.
+Person 1, Person 2 có vị trí 3D ổn định.
+4. Track management
+Quản lý tentative/confirmed/deleted.
+Không tạo box giả, không giữ box ảo, không đổi ID liên tục.
+
+15. Kiến trúc code đề xuất
+Nên chia code thành các module riêng để dễ debug và tinh chỉnh. File main.py chỉ nên điều phối luồng xử lý, không nên chứa toàn bộ logic.
+main.pyradar_reader.pytlv_parser.pypoint_filter.pycoordinate_transform.pyclusterer.pytracker.pytrack_manager.pyvisualizer.pysettings.py
+
+File
+Chức năng
+main.py
+Khởi tạo hệ thống, đọc frame, gọi filter/cluster/tracker, hiển thị output.
+radar_reader.py
+Đọc UART CFG/DATA hoặc nguồn point cloud từ radar.
+tlv_parser.py
+Parse TLV point cloud thành list point có x/y/z/velocity/snr/noise.
+point_filter.py
+ROI, SNR, noise, Doppler và temporal filtering.
+coordinate_transform.py
+Xoay tọa độ nếu radar đặt nghiêng, cộng offset chiều cao.
+clusterer.py
+DBSCAN/adaptive DBSCAN, cluster merge/split nếu cần.
+tracker.py
+Kalman/EKF predict/update và tính covariance.
+track_manager.py
+Quản lý tentative/confirmed/deleted, confidence, miss_count, hit_count.
+visualizer.py
+Vẽ top-view, 3D view, centroid, bounding box và track ID.
+settings.py
+Tập trung toàn bộ tham số: ROI, SNR, DBSCAN, tracking, display.
+
+Kết luận thiết kế
+Phase hiện tại chỉ cần làm thật tốt:point cloud -> filter -> cluster -> track -> stable ID/box
+
+Khi people tracking đã ổn định, các layer như posture recognition, chest localization và vital sign mới có nền tảng để thêm vào sau. Nếu bỏ qua tracking ổn định và nhảy thẳng vào vital sign/posture, hệ thống sẽ rất dễ bị sai do point cloud radar thưa và nhiễu.
+Tài liệu nên tham khảo thêm
+Texas Instruments: IWR6843 / mmWave People Tracking reference designs and GTRACK documentation.
+MathWorks: People Tracking Using TI mmWave Radar examples with DBSCAN, EKF/JIPDA and static reflection handling.
+Các bài nghiên cứu gần đây về people tracking dùng DBSCAN, adaptive DBSCAN, Kalman/EKF và multi-target track management.

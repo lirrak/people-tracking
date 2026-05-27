@@ -80,8 +80,8 @@ def get_human_box_from_target(target, height_map):
     Tạo hộp bao quanh người từ target.
 
     Ưu tiên:
-    1. Nếu có target height TLV -> dùng minZ / maxZ
-    2. Nếu không có -> dùng hộp mặc định quanh target position
+    1. Nếu ENABLE_GEOMETRIC_ANCHOR_LOCK -> Khóa cứng kích thước hộp hình dạng người mặc định
+    2. Nếu không có -> dùng chiều cao từ TLV hoặc hộp mặc định co giãn
     """
 
     tid = target["tid"]
@@ -90,34 +90,39 @@ def get_human_box_from_target(target, height_map):
     y = target["posY"]
     z = target["posZ"]
 
-    width_x = HUMAN_BOX_DEFAULT_WIDTH_X
-    depth_y = HUMAN_BOX_DEFAULT_DEPTH_Y
-
-    if USE_TARGET_HEIGHT_FOR_HUMAN_BOX and tid in height_map:
-        min_z = height_map[tid]["minZ"]
-        max_z = height_map[tid]["maxZ"]
-
-        height_z = max_z - min_z
-
-        if not np.isfinite(height_z) or height_z <= 0:
-            height_z = HUMAN_BOX_DEFAULT_HEIGHT_Z
-            center_z = z
-        else:
-            height_z = max(
-                HUMAN_BOX_MIN_HEIGHT_Z,
-                min(HUMAN_BOX_MAX_HEIGHT_Z, height_z)
-            )
-            center_z = (min_z + max_z) / 2.0
-
-    else:
+    # Áp dụng Neo giữ hình học (Version 13.0)
+    if ENABLE_GEOMETRIC_ANCHOR_LOCK if 'ENABLE_GEOMETRIC_ANCHOR_LOCK' in globals() else True:
+        width_x = HUMAN_BOX_DEFAULT_WIDTH_X
+        depth_y = HUMAN_BOX_DEFAULT_DEPTH_Y
         height_z = HUMAN_BOX_DEFAULT_HEIGHT_Z
-
-        # Với target thường, posZ có thể là tâm cụm.
-        # Với virtual pointcloud target, dùng z hiện tại làm tâm.
         center_z = z
-
         if not np.isfinite(center_z):
             center_z = height_z / 2.0
+    else:
+        width_x = HUMAN_BOX_DEFAULT_WIDTH_X
+        depth_y = HUMAN_BOX_DEFAULT_DEPTH_Y
+
+        if USE_TARGET_HEIGHT_FOR_HUMAN_BOX and tid in height_map:
+            min_z = height_map[tid]["minZ"]
+            max_z = height_map[tid]["maxZ"]
+
+            height_z = max_z - min_z
+
+            if not np.isfinite(height_z) or height_z <= 0:
+                height_z = HUMAN_BOX_DEFAULT_HEIGHT_Z
+                center_z = z
+            else:
+                height_z = max(
+                    HUMAN_BOX_MIN_HEIGHT_Z,
+                    min(HUMAN_BOX_MAX_HEIGHT_Z, height_z)
+                )
+                center_z = (min_z + max_z) / 2.0
+
+        else:
+            height_z = HUMAN_BOX_DEFAULT_HEIGHT_Z
+            center_z = z
+            if not np.isfinite(center_z):
+                center_z = height_z / 2.0
 
     center = (x, y, center_z)
     size = (width_x, depth_y, height_z)
@@ -129,24 +134,29 @@ def draw_sensor_box_3d(ax):
     if not SHOW_SENSOR_BOX:
         return
 
-    cx = SENSOR_X
-    cy = SENSOR_Y
-    cz = SENSOR_Z
-
     sx = SENSOR_BOX_SIZE_X / 2.0
     sy = SENSOR_BOX_SIZE_Y / 2.0
     sz = SENSOR_BOX_SIZE_Z / 2.0
 
-    vertices = np.array([
-        [cx - sx, cy - sy, cz - sz],
-        [cx + sx, cy - sy, cz - sz],
-        [cx + sx, cy + sy, cz - sz],
-        [cx - sx, cy + sy, cz - sz],
-        [cx - sx, cy - sy, cz + sz],
-        [cx + sx, cy - sy, cz + sz],
-        [cx + sx, cy + sy, cz + sz],
-        [cx - sx, cy + sy, cz + sz],
+    # Tính toán các đỉnh sau khi quay 30 độ và tịnh tiến lên độ cao lắp đặt thực tế (Version 14.0)
+    theta = np.radians(RADAR_TILT_ANGLE_DEG if 'RADAR_TILT_ANGLE_DEG' in globals() else 30.0)
+    h = RADAR_MOUNT_HEIGHT_M if 'RADAR_MOUNT_HEIGHT_M' in globals() else 1.15
+
+    local_vertices = np.array([
+        [-sx, -sy, -sz],
+        [ sx, -sy, -sz],
+        [ sx,  sy, -sz],
+        [-sx,  sy, -sz],
+        [-sx, -sy,  sz],
+        [ sx, -sy,  sz],
+        [ sx,  sy,  sz],
+        [-sx,  sy,  sz],
     ])
+
+    vertices = np.zeros_like(local_vertices)
+    vertices[:, 0] = local_vertices[:, 0]
+    vertices[:, 1] = local_vertices[:, 1] * np.cos(theta) - local_vertices[:, 2] * np.sin(theta)
+    vertices[:, 2] = local_vertices[:, 1] * np.sin(theta) + local_vertices[:, 2] * np.cos(theta) + h
 
     faces = [
         [vertices[0], vertices[1], vertices[2], vertices[3]],
@@ -171,12 +181,13 @@ def draw_sensor_box_3d(ax):
 
     if SHOW_SENSOR_LABEL:
         ax.text(
-            cx,
-            cy,
-            cz + sz + 0.08,
+            0.0,
+            0.0,
+            h + sz + 0.08,
             "Sensor",
             ha="center"
         )
+
 
 
 def draw_floor_box(ax):
@@ -205,6 +216,10 @@ def update_3d_plot(
     parser_status
 ):
     ax.cla()
+
+    # Đặt góc nhìn Camera khớp hoàn toàn với vị trí và độ nghiêng vật lý của Radar/Webcam (Version 14.0)
+    if ENABLE_CAMERA_VIEW_LOCK if 'ENABLE_CAMERA_VIEW_LOCK' in globals() else True:
+        ax.view_init(elev=RADAR_TILT_ANGLE_DEG if 'RADAR_TILT_ANGLE_DEG' in globals() else 30.0, azim=-90)
 
     ax.set_title(
         f"IWR6843AOP Viewer | Mode: {mode} | Frame {frame_number} | "

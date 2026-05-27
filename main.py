@@ -17,6 +17,7 @@ from uart_parser import AutoRadarUARTParser
 from filters import TrackHistory, GhostTargetFilter
 from pointcloud_processing import VirtualTargetTracker, HAS_SKLEARN, TemporalPointCloudStabilizer
 from visualization import setup_3d_plot, update_3d_plot
+from sync_recorder import SyncRecorder
 
 
 # ============================================================
@@ -79,6 +80,10 @@ def main():
         smoothing_reset_distance=TARGET_SMOOTHING_RESET_DISTANCE
     )
     virtual_tracker = VirtualTargetTracker()
+
+    # Khởi tạo bộ ghi hình đồng bộ (Version 11.0)
+    recorder = SyncRecorder()
+    recorder.start()
 
     fig, ax = setup_3d_plot()
 
@@ -304,6 +309,19 @@ def main():
                     parser_status=parser_status
                 )
 
+                # GHI VIDEO SIDE-BY-SIDE (Version 11.0)
+                if recorder.enabled:
+                    try:
+                        # Trích xuất trực tiếp ảnh RGB từ bộ đệm đồ họa Matplotlib
+                        fig.canvas.draw()
+                        rgba_buffer = fig.canvas.buffer_rgba()
+                        plot_img = np.asarray(rgba_buffer)[:, :, :3]
+                        
+                        # Ghi khung hình đồng bộ với số frame tương ứng
+                        recorder.write_frame(plot_img, frame_number=last_frame_number)
+                    except Exception as record_err:
+                        print(f"[WARNING] Grab canvas error: {record_err}")
+
                 last_plot_time = now
 
             plt.pause(0.001)
@@ -322,6 +340,12 @@ def main():
         print(f"[ERROR] Unexpected error: {e}")
 
     finally:
+        # Dừng webcam và lưu video an toàn (Version 11.0)
+        try:
+            recorder.stop()
+        except Exception as stop_err:
+            print(f"[WARNING] Error stopping recorder: {stop_err}")
+
         try:
             data_ser.close()
         except Exception:

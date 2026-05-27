@@ -9,6 +9,7 @@ This version adds:
 """
 
 import numpy as np
+from settings import *
 
 
 # ============================================================
@@ -164,6 +165,8 @@ class GhostTargetFilter:
         self.confirm_count = {}
         self.smoothed_position = {}
         self.last_target_state = {}  # Lưu trữ trạng thái cuối cùng của target đã confirm
+        self.history_positions = {}  # Lưu trữ lịch sử vị trí cho lọc tĩnh vật toàn diện (Version 16.0)
+        self.last_alpha = {}         # Lưu trữ hệ số alpha làm mịn chuyển động (Version 16.0)
 
     def reset(self):
         self.missing_count.clear()
@@ -171,6 +174,9 @@ class GhostTargetFilter:
         self.confirm_count.clear()
         self.smoothed_position.clear()
         self.last_target_state.clear()
+        self.history_positions.clear()
+        self.last_alpha.clear()
+
 
     def count_support_points(self, target, point_cloud):
         if point_cloud is None or len(point_cloud) == 0:
@@ -270,9 +276,36 @@ class GhostTargetFilter:
 
         if jump_distance > self.smoothing_reset_distance:
             smoothed = current
+            self.last_alpha.pop(tid, None)
         else:
-            alpha = self.smoothing_alpha
+            # Nội suy tuyến tính hệ số alpha thích nghi tốc độ (Version 12.0)
+            if (ENABLE_DYNAMIC_SMOOTHING if 'ENABLE_DYNAMIC_SMOOTHING' in globals() else True):
+                # Tính vận tốc dựa trên Doppler từ radar / Kalman
+                doppler_speed = self.target_speed(target)
+                
+                # Tính vận tốc dựa trên khoảng dời thực tế giữa 2 frame (displacement speed = jump_distance / dt)
+                # Giả định thời gian giữa 2 frame dt = 0.05 giây (20fps)
+                displacement_speed = jump_distance / 0.05
+                
+                # Sử dụng vận tốc hiệu dụng lớn nhất để thích nghi tức thời (Version 15.0)
+                effective_speed = max(doppler_speed, displacement_speed)
+                
+                v_scale = SMOOTHING_VELOCITY_SCALE if 'SMOOTHING_VELOCITY_SCALE' in globals() else 1.0
+                alpha_min = SMOOTHING_ALPHA_MIN if 'SMOOTHING_ALPHA_MIN' in globals() else 0.15
+                alpha_max = SMOOTHING_ALPHA_MAX if 'SMOOTHING_ALPHA_MAX' in globals() else 0.82
+                
+                # Tính alpha tức thời
+                current_alpha = alpha_min + (alpha_max - alpha_min) * min(1.0, effective_speed / v_scale)
+                
+                # Làm mịn biến thiên của alpha qua các frame bằng bộ lọc EMA (Version 16.0)
+                previous_alpha = self.last_alpha.get(tid, alpha_min)
+                alpha = previous_alpha * 0.80 + current_alpha * 0.20
+                self.last_alpha[tid] = alpha
+            else:
+                alpha = self.smoothing_alpha
             smoothed = previous * (1.0 - alpha) + current * alpha
+
+
 
         self.smoothed_position[tid] = smoothed
 
@@ -351,8 +384,31 @@ class GhostTargetFilter:
             tid = target.get("tid", -1)
             current_ids.add(tid)
 
+            # Ghi lại lịch sử vị trí cho cả target phần cứng và phần mềm (Version 16.0)
+            if tid not in self.history_positions:
+                self.history_positions[tid] = []
+            self.history_positions[tid].append([target.get("posX", 0.0), target.get("posY", 0.0)])
+            
+            min_frames = STATIC_CLUTTER_MIN_FRAMES if 'STATIC_CLUTTER_MIN_FRAMES' in globals() else 15
+            if len(self.history_positions[tid]) > min_frames:
+                self.history_positions[tid] = self.history_positions[tid][-min_frames:]
+
             supported = self.is_target_supported(target, point_cloud)
             target["ghostFiltered"] = not supported
+
+            # Lọc tĩnh vật toàn diện dựa trên độ lệch chuẩn vị trí (Version 16.0)
+            is_static = False
+            if (ENABLE_STATIC_CLUTTER_FILTER if 'ENABLE_STATIC_CLUTTER_FILTER' in globals() else True):
+                hist = self.history_positions[tid]
+                if len(hist) >= min_frames:
+                    hist_pts = np.array(hist)
+                    std_x = np.std(hist_pts[:, 0])
+                    std_y = np.std(hist_pts[:, 1])
+                    std_xy = np.sqrt(std_x**2 + std_y**2)
+                    
+                    max_std = STATIC_CLUTTER_MAX_STD if 'STATIC_CLUTTER_MAX_STD' in globals() else 0.05
+                    if std_xy <= max_std:
+                        is_static = True
 
             if supported:
                 self.missing_count[tid] = 0
@@ -361,7 +417,8 @@ class GhostTargetFilter:
 
                 if self.is_confirmed(target, supported):
                     target = self.smooth_target(target)
-                    filtered_targets.append(target)
+                    if not is_static:
+                        filtered_targets.append(target)
                     self.last_target_state[tid] = target.copy()  # Lưu lại trạng thái confirm tốt nhất
             else:
                 # Chỉ giữ lại target chập chờn nếu trước đó nó đã TỪNG được xác nhận thành công
@@ -374,7 +431,8 @@ class GhostTargetFilter:
                 if not self.drop_unsupported_immediately and was_previously_confirmed:
                     if self.missing_count[tid] <= self.max_missing_frames:
                         target = self.smooth_target(target)
-                        filtered_targets.append(target)
+                        if not is_static:
+                            filtered_targets.append(target)
                         self.last_target_state[tid] = target.copy()
 
         # 2) Xử lý các target bị mất ID hoàn toàn khỏi frame hiện tại (Dead Reckoning)
@@ -389,7 +447,24 @@ class GhostTargetFilter:
                     missing_target["ghostFiltered"] = True
                     
                     missing_target = self.smooth_target(missing_target)
-                    filtered_targets.append(missing_target)
+                    
+                    # Kiểm tra tĩnh vật cho cả target tái tạo
+                    is_static = False
+                    if (ENABLE_STATIC_CLUTTER_FILTER if 'ENABLE_STATIC_CLUTTER_FILTER' in globals() else True):
+                        hist = self.history_positions.get(tid, [])
+                        min_frames = STATIC_CLUTTER_MIN_FRAMES if 'STATIC_CLUTTER_MIN_FRAMES' in globals() else 15
+                        if len(hist) >= min_frames:
+                            hist_pts = np.array(hist)
+                            std_x = np.std(hist_pts[:, 0])
+                            std_y = np.std(hist_pts[:, 1])
+                            std_xy = np.sqrt(std_x**2 + std_y**2)
+                            
+                            max_std = STATIC_CLUTTER_MAX_STD if 'STATIC_CLUTTER_MAX_STD' in globals() else 0.05
+                            if std_xy <= max_std:
+                                is_static = True
+
+                    if not is_static:
+                        filtered_targets.append(missing_target)
                 else:
                     # Đã quá thời hạn giữ khung -> Tiến hành xóa sạch trạng thái
                     self.missing_count.pop(tid, None)
@@ -397,6 +472,8 @@ class GhostTargetFilter:
                     self.confirm_count.pop(tid, None)
                     self.smoothed_position.pop(tid, None)
                     self.last_target_state.pop(tid, None)
+                    self.history_positions.pop(tid, None)
+                    self.last_alpha.pop(tid, None)
 
         # 3) Dọn dẹp trạng thái của các target chưa từng được confirm nhưng đã biến mất khỏi frame hiện tại
         for tid in list(self.confirm_count.keys()):
@@ -405,6 +482,8 @@ class GhostTargetFilter:
                 self.missing_count.pop(tid, None)
                 self.last_seen_frame.pop(tid, None)
                 self.smoothed_position.pop(tid, None)
+                self.history_positions.pop(tid, None)
+                self.last_alpha.pop(tid, None)
 
         # 4) Lọc trùng và sắp xếp
         filtered_targets = self.remove_duplicates(filtered_targets)
@@ -423,5 +502,8 @@ class GhostTargetFilter:
                 self.confirm_count.pop(tid, None)
                 self.smoothed_position.pop(tid, None)
                 self.last_target_state.pop(tid, None)
+                self.history_positions.pop(tid, None)
+                self.last_alpha.pop(tid, None)
 
         return final_targets
+

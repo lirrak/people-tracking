@@ -103,7 +103,9 @@ MAX_ABS_DOPPLER = 4.0
 # ============================================================
 ENABLE_COORD_TRANSFORM = True
 RADAR_TILT_ANGLE_DEG = 30.0   # Góc nghiêng chĩa xuống của radar (độ)
-RADAR_MOUNT_HEIGHT_M = 0.60   # Chiều cao lắp đặt radar so với mặt đất (mét)
+RADAR_MOUNT_HEIGHT_M = 1.15   # Chiều cao lắp đặt radar so với mặt đất (mét) - đã điều chỉnh theo thực tế kẹp màn hình
+FLIP_X_PERSPECTIVE = True     # Đảo trục X để đồng bộ góc nhìn đối diện (Trải nghiệm người dùng bên phải = Màn hình bên phải)
+
 
 # DBSCAN clustering.
 # eps nhỏ hơn giúp tách người gần nhau tốt hơn nhưng có thể làm cụm bị vỡ.
@@ -296,3 +298,75 @@ HUMAN_BOX_MAX_HEIGHT_Z = 2.3
 
 # Có hiển thị chữ trên hộp người không
 SHOW_HUMAN_BOX_LABEL = True
+
+
+# ============================================================
+# KALMAN TRACKING CONFIGURATION (Version 8.0)
+# ============================================================
+ENABLE_VIRTUAL_KALMAN = True
+
+# Sai số đo lường (Measurement Noise R) - mặc định 0.08m cho vị trí XY, 0.15m cho Z
+KALMAN_MEASUREMENT_NOISE_XY = 0.08
+KALMAN_MEASUREMENT_NOISE_Z = 0.15
+
+# Sai số hệ thống (Process Noise Q) - tương ứng gia tốc nhiễu ngẫu nhiên
+KALMAN_PROCESS_NOISE_ACC = 0.20
+
+# Cấu hình lọc điểm thích nghi khoảng cách
+ENABLE_DISTANCE_ADAPTIVE_SNR = True
+SNR_MIN_NEAR = 6.0
+SNR_MIN_FAR = 4.0
+SNR_BOUNDARY_DISTANCE = 1.5
+
+# Lọc nhiễu tĩnh mức Point Cloud
+ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER = True
+STATIC_CLUTTER_POINT_PROTECTION_RADIUS = 1.0  # Giữ lại điểm tĩnh nếu nằm trong bán kính 1m quanh Confirmed Track
+
+# Lọc Cluster Validation cứng
+MIN_AVG_SNR = 5.0
+
+
+# ============================================================
+# WEBCAM & VIDEO RECORDING SETTINGS (Version 11.0)
+# ============================================================
+ENABLE_WEBCAM = True                # Bật/tắt webcam song song
+WEBCAM_INDEX = 1                    # ID của camera (1 là camera bên ngoài USB, 0 là camera mặc định laptop)
+WEBCAM_RESOLUTION = (640, 480)      # Độ phân giải webcam (Width, Height)
+
+ENABLE_RECORDING = True             # Bật/tắt chế độ tự động ghi hình
+RECORD_OUTPUT_DIR = "records"       # Thư mục lưu trữ video phân tích
+RECORD_FPS = 15                     # Tốc độ khung hình của video lưu trữ
+
+
+# ============================================================
+# DYNAMICS ADAPTIVE TRACKING SETTINGS (Version 12.0)
+# ============================================================
+ENABLE_ADAPTIVE_TIMEOUT = True
+ADAPTIVE_TIMEOUT_STATIONARY_FRAMES = 35 # Tăng thời gian chờ lên 1.75s khi đứng im
+
+ENABLE_DYNAMIC_SMOOTHING = True
+SMOOTHING_ALPHA_MIN = 0.15             # Cực kỳ mượt khi đứng im/đi chậm
+SMOOTHING_ALPHA_MAX = 0.82             # Phản hồi tức thời khi chạy/đi nhanh
+SMOOTHING_VELOCITY_SCALE = 1.0         # Tốc độ quy đổi đạt tối đa nhạy bén (m/s)
+
+ENABLE_MICRO_MOTION_ZONE = True
+MICRO_MOTION_ZONE_RADIUS = 0.80        # Bán kính 80cm quanh confirmed track
+MICRO_MOTION_MIN_SNR = 1.0             # Giảm ngưỡng SNR để giữ điểm phản xạ thở/cử động nhẹ
+
+
+# ============================================================
+# GEOMETRIC ANCHOR & COMPENSATIONS (Version 13.0)
+# ============================================================
+ENABLE_GEOMETRIC_ANCHOR_LOCK = True    # Khóa kích thước hình thể khi bám vết
+BOX_SIZE_SMOOTHING_ALPHA = 0.05        # Làm mịn kích thước cực mạnh để chống phình hộp gộp ghế
+
+ENABLE_ANTENNA_EDGE_COMPENSATION = True # Nhân bù cường độ SNR ở rìa quét biên (>40 độ)
+ANTENNA_EDGE_BOUNDARY_DEG = 40.0
+ANTENNA_EDGE_MAX_COMP_SCALE = 0.6      # Bù thêm tối đa 60% SNR tại rìa biên 60 độ
+
+
+# ============================================================
+# CAMERA & VIEWPORT LOCK (Version 14.0)
+# ============================================================
+ENABLE_CAMERA_VIEW_LOCK = True         # Khóa góc nhìn Matplotlib 3D đồng bộ với Webcam thực tế
+

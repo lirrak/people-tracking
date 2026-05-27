@@ -13,6 +13,7 @@ This file has no hard dependency on scikit-learn. If sklearn is not installed,
 it uses a small built-in DBSCAN fallback.
 """
 
+import time
 import numpy as np
 from settings import *
 
@@ -22,6 +23,77 @@ try:
 except Exception:
     SklearnDBSCAN = None
     HAS_SKLEARN = False
+
+
+# ============================================================
+# 3D CONSTANT VELOCITY KALMAN FILTER (Version 8.0)
+# ============================================================
+
+class KalmanTracker3D:
+    def __init__(self, init_pos, dt=0.05):
+        self.dt = dt
+        # Trạng thái x = [px, py, pz, vx, vy, vz]^T
+        self.x = np.array([init_pos[0], init_pos[1], init_pos[2], 0.0, 0.0, 0.0], dtype=np.float32)
+        
+        # Ma trận hiệp phương sai sai số trạng thái P
+        self.P = np.eye(6, dtype=np.float32) * 0.1
+        self.P[3:, 3:] *= 1.0  # Tăng độ bất định ban đầu của vận tốc
+        
+        # Ma trận chuyển trạng thái F
+        self.F = np.eye(6, dtype=np.float32)
+        
+        # Ma trận đo lường H (Chỉ đo vị trí 3D từ Centroid)
+        self.H = np.zeros((3, 6), dtype=np.float32)
+        self.H[0, 0] = 1.0
+        self.H[1, 1] = 1.0
+        self.H[2, 2] = 1.0
+        
+        # Cấu hình nhiễu đo lường R
+        r_xy = KALMAN_MEASUREMENT_NOISE_XY if 'KALMAN_MEASUREMENT_NOISE_XY' in globals() else 0.08
+        r_z = KALMAN_MEASUREMENT_NOISE_Z if 'KALMAN_MEASUREMENT_NOISE_Z' in globals() else 0.15
+        self.R = np.diag([r_xy**2, r_xy**2, r_z**2]).astype(np.float32)
+        
+        # Cấu hình nhiễu hệ thống Q
+        self.q_acc = KALMAN_PROCESS_NOISE_ACC if 'KALMAN_PROCESS_NOISE_ACC' in globals() else 0.20
+        
+        self.update_dt(dt)
+
+
+    def update_dt(self, dt):
+        self.dt = dt
+        self.F[0, 3] = dt
+        self.F[1, 4] = dt
+        self.F[2, 5] = dt
+        self._calc_Q()
+
+    def _calc_Q(self):
+        dt = self.dt
+        q = self.q_acc ** 2
+        Q_pos = (dt**3)/3.0 * q
+        Q_vel = dt * q
+        Q_cross = (dt**2)/2.0 * q
+        
+        self.Q = np.zeros((6, 6), dtype=np.float32)
+        for i in range(3):
+            self.Q[i, i] = Q_pos
+            self.Q[i+3, i+3] = Q_vel
+            self.Q[i, i+3] = Q_cross
+            self.Q[i+3, i] = Q_cross
+
+    def predict(self):
+        self.x = np.dot(self.F, self.x)
+        self.P = np.dot(np.dot(self.F, self.P), self.F.T) + self.Q
+        return self.x[:3]
+
+    def update(self, measurement):
+        z = np.array(measurement, dtype=np.float32)
+        y = z - np.dot(self.H, self.x)
+        S = np.dot(np.dot(self.H, self.P), self.H.T) + self.R
+        K = np.dot(np.dot(self.P, self.H.T), np.linalg.inv(S))
+        
+        self.x = self.x + np.dot(K, y)
+        self.P = np.dot(np.eye(6, dtype=np.float32) - np.dot(K, self.H), self.P)
+        return self.x
 
 
 # ============================================================
@@ -74,9 +146,13 @@ def transform_to_room_coordinates(points):
     y_radar = points[:, 1]
     z_radar = points[:, 2]
     
-    # Rotation around X-axis (pitch) and translation along Z (mount height)
-    transformed[:, 1] = y_radar * np.cos(theta) - z_radar * np.sin(theta)
-    transformed[:, 2] = y_radar * np.sin(theta) + z_radar * np.cos(theta) + h
+    # Flip X perspective if enabled (User Right = Screen Right)
+    if FLIP_X_PERSPECTIVE if 'FLIP_X_PERSPECTIVE' in globals() else False:
+        transformed[:, 0] = -points[:, 0]
+    
+    # Rotation around X-axis (pitch) and translation along Z (mount height) - Pitch DOWN (Version 16.0)
+    transformed[:, 1] = y_radar * np.cos(theta) + z_radar * np.sin(theta)
+    transformed[:, 2] = -y_radar * np.sin(theta) + z_radar * np.cos(theta) + h
     
     return transformed
 
@@ -91,20 +167,29 @@ def transform_target_to_room_coordinates(target):
     theta = np.radians(theta_deg)
     
     transformed = dict(target)
+    
+    # Tự động đảo ngược trục X của mục tiêu và vận tốc, gia tốc tương ứng
+    if FLIP_X_PERSPECTIVE if 'FLIP_X_PERSPECTIVE' in globals() else False:
+        transformed["posX"] = -target.get("posX", 0.0)
+        transformed["velX"] = -target.get("velX", 0.0)
+        transformed["accX"] = -target.get("accX", 0.0)
+        
     y_radar = target.get("posY", 0.0)
     z_radar = target.get("posZ", 0.0)
     
-    transformed["posY"] = float(y_radar * np.cos(theta) - z_radar * np.sin(theta))
-    transformed["posZ"] = float(y_radar * np.sin(theta) + z_radar * np.cos(theta) + h)
+    transformed["posY"] = float(y_radar * np.cos(theta) + z_radar * np.sin(theta))
+    transformed["posZ"] = float(-y_radar * np.sin(theta) + z_radar * np.cos(theta) + h)
     
     return transformed
+
+
 
 
 # ============================================================
 # ROI + QUALITY FILTER
 # ============================================================
 
-def build_human_point_mask(points):
+def build_human_point_mask(points, confirmed_track_positions=[]):
     """
     Build mask for points that can realistically belong to a person.
 
@@ -138,10 +223,60 @@ def build_human_point_mask(points):
         has_real_snr = bool(np.nanmax(np.abs(snr)) > 0.001)
 
         if has_real_snr:
-            mask &= (snr >= MIN_POINT_SNR) & (snr <= MAX_POINT_SNR)
+            # Thuật toán bù độ nhạy rìa quét biên (Version 13.0)
+            if ENABLE_ANTENNA_EDGE_COMPENSATION if 'ENABLE_ANTENNA_EDGE_COMPENSATION' in globals() else True:
+                azimuth_rad = np.abs(np.arctan2(x, y))
+                azimuth_deg = np.degrees(azimuth_rad)
+                
+                edge_boundary = ANTENNA_EDGE_BOUNDARY_DEG if 'ANTENNA_EDGE_BOUNDARY_DEG' in globals() else 40.0
+                max_comp = ANTENNA_EDGE_MAX_COMP_SCALE if 'ANTENNA_EDGE_MAX_COMP_SCALE' in globals() else 0.6
+                
+                comp_factor = 1.0 + max_comp * np.clip((azimuth_deg - edge_boundary) / 20.0, 0.0, 1.0)
+                snr_compensated = snr * comp_factor
+            else:
+                snr_compensated = snr
+
+            if ENABLE_DISTANCE_ADAPTIVE_SNR if 'ENABLE_DISTANCE_ADAPTIVE_SNR' in globals() else True:
+                boundary = SNR_BOUNDARY_DISTANCE if 'SNR_BOUNDARY_DISTANCE' in globals() else 1.5
+                near_snr = SNR_MIN_NEAR if 'SNR_MIN_NEAR' in globals() else 6.0
+                far_snr = SNR_MIN_FAR if 'SNR_MIN_FAR' in globals() else 4.0
+                dynamic_min_snr = np.where(y < boundary, near_snr, far_snr)
+                min_snr_limit = dynamic_min_snr
+            else:
+                min_snr_limit = MIN_POINT_SNR
+
+            if (ENABLE_MICRO_MOTION_ZONE if 'ENABLE_MICRO_MOTION_ZONE' in globals() else True) and len(confirmed_track_positions) > 0:
+                in_protection_zone = np.zeros(len(points), dtype=bool)
+                prot_r = MICRO_MOTION_ZONE_RADIUS if 'MICRO_MOTION_ZONE_RADIUS' in globals() else 0.80
+                for track_pos in confirmed_track_positions:
+                    dist_xy = np.sqrt((x - track_pos[0])**2 + (y - track_pos[1])**2)
+                    in_protection_zone |= (dist_xy <= prot_r)
+                
+                micro_snr = MICRO_MOTION_MIN_SNR if 'MICRO_MOTION_MIN_SNR' in globals() else 1.0
+                if isinstance(min_snr_limit, np.ndarray):
+                    effective_min_snr = np.where(in_protection_zone, micro_snr, min_snr_limit)
+                else:
+                    effective_min_snr = np.where(in_protection_zone, micro_snr, float(min_snr_limit))
+            else:
+                effective_min_snr = min_snr_limit
+
+            mask &= (snr_compensated >= effective_min_snr) & (snr_compensated <= MAX_POINT_SNR)
 
     if ENABLE_DOPPLER_OUTLIER_FILTER:
         mask &= np.abs(doppler) <= MAX_ABS_DOPPLER
+
+    # Doppler static clutter suppression at point level
+    if ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER if 'ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER' in globals() else True:
+        near_zero_doppler = np.abs(doppler) < 0.05
+        if len(confirmed_track_positions) > 0 and np.any(near_zero_doppler):
+            keep_static_point = np.zeros(len(points), dtype=bool)
+            prot_r = STATIC_CLUTTER_POINT_PROTECTION_RADIUS if 'STATIC_CLUTTER_POINT_PROTECTION_RADIUS' in globals() else 1.0
+            for track_pos in confirmed_track_positions:
+                dist_xy = np.sqrt((x - track_pos[0])**2 + (y - track_pos[1])**2)
+                keep_static_point |= (dist_xy <= prot_r)
+            mask &= (~near_zero_doppler | keep_static_point)
+        elif np.any(near_zero_doppler):
+            mask &= ~near_zero_doppler
 
     return mask
 
@@ -382,6 +517,11 @@ def score_human_cluster(points):
     avg_motion = float(np.mean(np.abs(doppler))) if point_count > 0 else 0.0
 
     is_shape_valid = True
+
+    # Cluster validation: SNR check
+    min_avg_snr = MIN_AVG_SNR if 'MIN_AVG_SNR' in globals() else 5.0
+    if avg_snr < min_avg_snr:
+        is_shape_valid = False
 
     if height_z < HUMAN_CLUSTER_MIN_HEIGHT_Z:
         is_shape_valid = False
@@ -893,20 +1033,26 @@ def suppress_multipath_ghosts(candidates):
 class VirtualTargetTracker:
     """
     Stateful tracker cho các target ảo sinh ra từ Point Cloud.
-    Giải quyết triệt để lỗi nhảy ID ngẫu nhiên của DBSCAN và lọc sạch vật thể tĩnh (bàn ghế).
+    Giải quyết triệt để lỗi nhảy ID ngẫu nhiên của DBSCAN, tích hợp bộ lọc 3D Kalman và quản lý trạng thái.
     """
     def __init__(self):
         self.next_virtual_id = VIRTUAL_TARGET_ID_BASE # 1000
-        self.active_targets = {} # tid -> { "center": np.array, "history_positions": [], "history_dopplers": [], "last_seen_frame": frame }
+        self.active_tracks = {} # tid -> { "kalman": KalmanTracker3D, "state": "tentative"|"confirmed", "hit_count": int, "miss_count": int, "features": dict }
+        self.last_time = None
 
     def reset(self):
         self.next_virtual_id = VIRTUAL_TARGET_ID_BASE
-        self.active_targets.clear()
+        self.active_tracks.clear()
+        self.last_time = None
 
     def track_and_build(self, raw_targets, point_cloud, target_index=None, frame_number=0):
-        """
-        Gom cụm điểm mây -> So khớp ID ổn định -> Lọc vật thể tĩnh -> Trả về final targets.
-        """
+        # 1) Tính toán dt thực tế giữa các frame
+        current_time = time.time()
+        dt = 0.05
+        if self.last_time is not None:
+            dt = max(0.01, min(0.20, current_time - self.last_time))
+        self.last_time = current_time
+
         if raw_targets is None:
             raw_targets = []
 
@@ -914,14 +1060,28 @@ class VirtualTargetTracker:
         point_cloud = transform_to_room_coordinates(point_cloud)
         raw_targets = [transform_target_to_room_coordinates(t) for t in raw_targets]
 
+        # Lấy danh sách vị trí confirmed tracks để bảo vệ điểm tĩnh
+        confirmed_positions = [
+            track_info["kalman"].x[:2] 
+            for track_info in self.active_tracks.values() 
+            if track_info["state"] == "confirmed"
+        ]
+        
+        # Thêm các target phần cứng vào danh sách vị trí đã xác nhận để bảo vệ điểm tĩnh (Version 14.0)
+        for target in raw_targets:
+            if "posX" in target and "posY" in target:
+                confirmed_positions.append(np.array([target["posX"], target["posY"]], dtype=np.float32))
+
+
         point_cloud = ensure_point_cloud_shape(point_cloud)
-        roi_points, roi_original_indices = filter_human_roi_with_indices(point_cloud)
+        roi_mask = build_human_point_mask(point_cloud, confirmed_positions)
+        roi_points = point_cloud[roi_mask]
         clusters = cluster_pointcloud(roi_points)
 
         final_targets = []
         cluster_debug = []
 
-        # 1) Đánh giá và lọc target phần cứng (Firmware Targets)
+        # 2) Đánh giá và lọc target phần cứng (Firmware Targets)
         for target in raw_targets:
             target = dict(target)
             tid = target.get("tid", -1)
@@ -952,25 +1112,23 @@ class VirtualTargetTracker:
             if score >= HUMAN_SCORE_TARGET_THRESHOLD or len(associated_points) >= GHOST_MIN_SUPPORT_POINTS:
                 final_targets.append(target)
 
-        # 2) Xử lý đa mục tiêu ảo song song (Virtual Targets)
+        # 3) Dự báo trạng thái Kalman (Kalman Predict Step)
+        predictions = {}
+        for tid, track_info in self.active_tracks.items():
+            track_info["kalman"].update_dt(dt)
+            pred_pos = track_info["kalman"].predict()
+            predictions[tid] = pred_pos
+
+        # 4) Phân nhóm mây điểm ảo thành các cụm người hợp lệ
         allow_virtual_targets = ENABLE_VIRTUAL_CLUSTER_TARGETS
         if VIRTUAL_CLUSTER_ONLY_WHEN_NO_FIRMWARE_TARGETS and len(final_targets) > 0:
             allow_virtual_targets = False
 
         merged_clusters = merge_nearby_clusters(clusters)
-        virtual_candidates = []
-
-        # Dọn dẹp các target ảo đã biến mất quá lâu (> 15 frame) trong tracker
-        for tid in list(self.active_targets.keys()):
-            if frame_number - self.active_targets[tid]["last_seen_frame"] > 15:
-                self.active_targets.pop(tid, None)
-
-        cluster_centers = []
-        cluster_scores = []
-        cluster_features = []
-        cluster_point_counts = []
-        cluster_dopplers = []
-        valid_indices = []
+        valid_centroids = []
+        valid_scores = []
+        valid_features = []
+        valid_counts = []
 
         for cid, cluster in enumerate(merged_clusters):
             score, features = score_human_cluster(cluster)
@@ -994,125 +1152,133 @@ class VirtualTargetTracker:
             if score < VIRTUAL_CLUSTER_SCORE_THRESHOLD:
                 continue
 
-            cluster_centers.append(cluster_center)
-            cluster_scores.append(score)
-            cluster_features.append(features)
-            cluster_point_counts.append(len(cluster))
-            cluster_dopplers.append(features.get("avg_motion", 0.0))
-            valid_indices.append(cid)
+            valid_centroids.append(cluster_center)
+            valid_scores.append(score)
+            valid_features.append(features)
+            valid_counts.append(len(cluster))
 
-        # Tiến hành so khớp không gian thời gian (Spatial Association Matcher)
-        matched_cluster_ids = set()
+        # 5) Data Association dựa trên Nearest Neighbor so với Prediction
+        matched_cluster_indices = set()
         matched_tids = set()
-        assignments = {} # cluster_index -> tid
+        assignments = {}
 
-        if self.active_targets and cluster_centers:
+        if self.active_tracks and valid_centroids:
             pairs = []
-            for c_idx, cc in enumerate(cluster_centers):
-                for tid, target_info in self.active_targets.items():
-                    tc = target_info["center"]
-                    dist_xy = float(np.sqrt((cc[0] - tc[0])**2 + (cc[1] - tc[1])**2))
+            for c_idx, cc in enumerate(valid_centroids):
+                for tid, pred_pos in predictions.items():
+                    dist_xy = float(np.sqrt((cc[0] - pred_pos[0])**2 + (cc[1] - pred_pos[1])**2))
                     pairs.append((dist_xy, c_idx, tid))
             
-            # Sắp xếp các cặp theo khoảng cách tăng dần
             pairs.sort(key=lambda x: x[0])
+            assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS
             
-            # Áp dụng bán kính so khớp liên khung độc lập để bảo toàn ID ổn định
-            assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS if 'VIRTUAL_TRACKER_ASSOCIATION_RADIUS' in globals() else VIRTUAL_CLUSTER_MERGE_DISTANCE_XY
-            
-            # Liên kết tham lam (Greedy Association)
             for dist_xy, c_idx, tid in pairs:
-                if c_idx not in matched_cluster_ids and tid not in matched_tids:
+                if c_idx not in matched_cluster_indices and tid not in matched_tids:
                     if dist_xy <= assoc_radius:
-                        matched_cluster_ids.add(c_idx)
+                        matched_cluster_indices.add(c_idx)
                         matched_tids.add(tid)
                         assignments[c_idx] = tid
 
-        # Tạo target ảo từ các cụm đã gán ID ổn định
-        for c_idx, cc in enumerate(cluster_centers):
-            score = cluster_scores[c_idx]
-            features = cluster_features[c_idx]
-            pt_count = cluster_point_counts[c_idx]
-            avg_motion = cluster_dopplers[c_idx]
-            orig_cid = valid_indices[c_idx]
+        # 6) Tạo mới hoặc cập nhật bộ lọc Kalman (Update Step)
+        for c_idx, cc in enumerate(valid_centroids):
+            score = valid_scores[c_idx]
+            features = valid_features[c_idx]
+            pt_count = valid_counts[c_idx]
 
             if c_idx in assignments:
                 tid = assignments[c_idx]
-                target_info = self.active_targets[tid]
-                target_info["center"] = cc
-                target_info["last_seen_frame"] = frame_number
+                track_info = self.active_tracks[tid]
+                track_info["kalman"].update(cc)
+                track_info["hit_count"] += 1
+                track_info["miss_count"] = 0
+                track_info["score"] = score
+                track_info["features"] = features
+                track_info["pt_count"] = pt_count
+                
+                # Nâng cấp lên confirmed nếu đủ số frame tích lũy
+                if track_info["state"] == "tentative" and track_info["hit_count"] >= TARGET_CONFIRM_FRAMES:
+                    track_info["state"] = "confirmed"
             else:
-                # Cấp phát ID mới duy nhất nếu xuất hiện cụm mới hoàn toàn
                 tid = self.next_virtual_id
                 self.next_virtual_id += 1
-                target_info = {
-                    "center": cc,
-                    "history_positions": [],
-                    "history_dopplers": [],
-                    "last_seen_frame": frame_number
+                
+                self.active_tracks[tid] = {
+                    "kalman": KalmanTracker3D(cc, dt),
+                    "state": "tentative",
+                    "hit_count": 1,
+                    "miss_count": 0,
+                    "features": features,
+                    "score": score,
+                    "pt_count": pt_count
                 }
-                self.active_targets[tid] = target_info
 
-            # Ghi nhận lịch sử vị trí và Doppler để phân tích vật thể tĩnh
-            target_info["history_positions"].append(cc[:2])
-            target_info["history_dopplers"].append(avg_motion)
 
-            if len(target_info["history_positions"]) > STATIC_CLUTTER_MIN_FRAMES:
-                target_info["history_positions"] = target_info["history_positions"][-STATIC_CLUTTER_MIN_FRAMES:]
-                target_info["history_dopplers"] = target_info["history_dopplers"][-STATIC_CLUTTER_MIN_FRAMES:]
+        # 7) Quản lý các track bị mất tích (Dead Reckoning & Deletion)
+        for tid in list(self.active_tracks.keys()):
+            if tid not in matched_tids:
+                track_info = self.active_tracks[tid]
+                track_info["miss_count"] += 1
+                
+                max_miss = GHOST_MAX_MISSING_FRAMES
+                if track_info["state"] == "tentative":
+                    max_miss = 1  # Tentative biến mất 1 frame là xóa ngay lập tức
+                elif track_info["state"] == "confirmed" and (ENABLE_ADAPTIVE_TIMEOUT if 'ENABLE_ADAPTIVE_TIMEOUT' in globals() else True):
+                    # Nếu tốc độ thấp (đang đứng im), tăng thời gian chờ thích nghi (Version 12.0)
+                    k_state = track_info["kalman"].x
+                    vx, vy, vz = k_state[3], k_state[4], k_state[5]
+                    speed = np.sqrt(vx**2 + vy**2 + vz**2)
+                    if speed < 0.25:
+                        max_miss = ADAPTIVE_TIMEOUT_STATIONARY_FRAMES if 'ADAPTIVE_TIMEOUT_STATIONARY_FRAMES' in globals() else 35
+                
+                if track_info["miss_count"] > max_miss:
+                    self.active_tracks.pop(tid, None)
 
-            # Áp dụng bộ lọc vật thể tĩnh
-            is_clutter = False
-            if ENABLE_STATIC_CLUTTER_FILTER and len(target_info["history_positions"]) >= STATIC_CLUTTER_MIN_FRAMES:
-                pos_history = np.array(target_info["history_positions"])
-                std_x = float(np.std(pos_history[:, 0]))
-                std_y = float(np.std(pos_history[:, 1]))
-                mean_doppler = float(np.mean(target_info["history_dopplers"]))
+        # 8) Xuất danh sách Confirmed Tracks ra virtual targets chính thức
+        virtual_targets = []
+        for tid, track_info in self.active_tracks.items():
+            if track_info["state"] != "confirmed":
+                continue
 
-                # Nếu biến thiên vị trí < 5cm và Doppler < 0.04m/s -> Nhiễu bàn ghế tĩnh
-                if std_x < STATIC_CLUTTER_MAX_STD and std_y < STATIC_CLUTTER_MAX_STD and mean_doppler < STATIC_CLUTTER_MAX_DOPPLER:
-                    is_clutter = True
-
-            if is_clutter:
-                continue # Bỏ qua, không đưa vật thể tĩnh vào danh sách target hiển thị
+            k_state = track_info["kalman"].x
 
             virtual_target = {
                 "tid": int(tid),
-                "posX": float(cc[0]),
-                "posY": float(cc[1]),
-                "posZ": float(cc[2]),
-                "velX": 0.0,
-                "velY": 0.0,
-                "velZ": 0.0,
+                "posX": float(k_state[0]),
+                "posY": float(k_state[1]),
+                "posZ": float(k_state[2]),
+                "velX": float(k_state[3]),
+                "velY": float(k_state[4]),
+                "velZ": float(k_state[5]),
                 "accX": 0.0,
                 "accY": 0.0,
                 "accZ": 0.0,
                 "isVirtual": True,
                 "source": "cluster",
-                "supportPointCount": int(pt_count),
-                "humanScore": score,
-                "clusterFeatures": features,
+                "supportPointCount": int(track_info["pt_count"]),
+                "humanScore": float(track_info["score"]),
+                "clusterFeatures": track_info["features"],
+                "kalmanTracked": True
             }
 
-            # Tránh tạo trùng hộp ảo nếu đã có target phần cứng ở sát bên
+            # Lọc chống gộp trùng với target phần cứng
             too_close_to_existing = False
-            for target in final_targets:
-                if target_xy_distance(virtual_target, target) < CLUSTER_TO_TARGET_MIN_DISTANCE_XY:
+            for hw_target in final_targets:
+                if target_xy_distance(virtual_target, hw_target) < CLUSTER_TO_TARGET_MIN_DISTANCE_XY:
                     too_close_to_existing = True
                     break
 
             if not too_close_to_existing:
-                virtual_candidates.append(virtual_target)
+                virtual_targets.append(virtual_target)
 
-        # Sắp xếp và giới hạn số lượng target ảo hiển thị song song
-        virtual_candidates.sort(
+        # Sắp xếp và giới hạn số lượng mục tiêu ảo song song
+        virtual_targets.sort(
             key=lambda t: (t.get("humanScore", 0.0), t.get("supportPointCount", 0)),
             reverse=True
         )
 
-        final_targets.extend(virtual_candidates[:VIRTUAL_CLUSTER_MAX_TARGETS])
+        final_targets.extend(virtual_targets[:VIRTUAL_CLUSTER_MAX_TARGETS])
         
-        # Triệt tiêu các Ghost Target sinh ra do dội sóng đa đường
+        # Triệt tiêu các Ghost Target dội sóng gương qua tường
         final_targets = suppress_multipath_ghosts(final_targets)
         
         final_targets.sort(key=lambda t: t.get("tid", 0))
@@ -1120,4 +1286,5 @@ class VirtualTargetTracker:
         display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud
 
         return final_targets, display_point_cloud, cluster_debug
+
 
