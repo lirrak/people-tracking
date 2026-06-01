@@ -28,7 +28,8 @@ def draw_wireframe_box_3d(
     size,
     label=None,
     linewidth=1.8,
-    alpha=1.0
+    alpha=1.0,
+    color=None
 ):
     """
     Vẽ hộp wireframe 3D.
@@ -70,6 +71,7 @@ def draw_wireframe_box_3d(
             [vertices[edge_start, 2], vertices[edge_end, 2]],
             linewidth=linewidth,
             alpha=alpha,
+            color=color,
             label=label if first_edge and label else None
         )
         first_edge = False
@@ -275,13 +277,8 @@ def update_3d_plot(
                     height_map
                 )
 
-                box_label = None
-
-                if SHOW_HUMAN_BOX_LABEL:
-                    if is_virtual:
-                        box_label = f"Human box ID {tid} PC"
-                    else:
-                        box_label = f"Human box ID {tid}"
+                box_color = None
+                box_label = f"ID {tid}" if SHOW_HUMAN_BOX_LABEL else None
 
                 draw_wireframe_box_3d(
                     ax=ax,
@@ -289,7 +286,8 @@ def update_3d_plot(
                     size=human_box_size,
                     label=box_label,
                     linewidth=1.8,
-                    alpha=0.95
+                    alpha=0.95,
+                    color=box_color
                 )
 
             # -----------------------------
@@ -309,6 +307,7 @@ def update_3d_plot(
             )
 
             label_text = f"ID {tid}"
+            
             if is_virtual:
                 label_text += "\nPC detect"
             if "supportPointCount" in target:

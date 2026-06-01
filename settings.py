@@ -98,6 +98,11 @@ MAX_POINT_SNR = 300.0
 ENABLE_DOPPLER_OUTLIER_FILTER = True
 MAX_ABS_DOPPLER = 4.0
 
+# Bộ lọc nhiễu tĩnh vật cấp độ điểm mây (Point-level) (Version 20.0)
+ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER = True
+STATIC_CLUTTER_POINT_DOPPLER_THRESHOLD = 0.015      # Giảm từ 0.05 xuống 0.015 để giữ vi động hơi thở của người đứng yên
+STATIC_CLUTTER_POINT_PROTECTION_RADIUS = 1.2         # Bán kính bảo vệ điểm tĩnh xung quanh track đã confirmed
+
 # ============================================================
 # RADAR INSTALLATION & COORDINATE TRANSFORMATION
 # ============================================================
@@ -329,13 +334,21 @@ MIN_AVG_SNR = 5.0
 # ============================================================
 # WEBCAM & VIDEO RECORDING SETTINGS (Version 11.0)
 # ============================================================
-ENABLE_WEBCAM = True                # Bật/tắt webcam song song
+ENABLE_WEBCAM = False                # Bật/tắt webcam song song
 WEBCAM_INDEX = 1                    # ID của camera (1 là camera bên ngoài USB, 0 là camera mặc định laptop)
 WEBCAM_RESOLUTION = (640, 480)      # Độ phân giải webcam (Width, Height)
 
 ENABLE_RECORDING = True             # Bật/tắt chế độ tự động ghi hình
 RECORD_OUTPUT_DIR = "records"       # Thư mục lưu trữ video phân tích
 RECORD_FPS = 15                     # Tốc độ khung hình của video lưu trữ
+
+
+# ============================================================
+# POINT CLOUD LOGGING SETTINGS (Version 17.0)
+# ============================================================
+ENABLE_POINTCLOUD_LOG = True        # Xuất log thông số point cloud ra file CSV
+POINTCLOUD_LOG_DIR = "log"          # Thư mục lưu log point cloud
+
 
 
 # ============================================================
@@ -369,4 +382,26 @@ ANTENNA_EDGE_MAX_COMP_SCALE = 0.6      # Bù thêm tối đa 60% SNR tại rìa 
 # CAMERA & VIEWPORT LOCK (Version 14.0)
 # ============================================================
 ENABLE_CAMERA_VIEW_LOCK = True         # Khóa góc nhìn Matplotlib 3D đồng bộ với Webcam thực tế
+
+
+# ============================================================
+# INTERACTING MULTIPLE MODEL (IMM) FILTER SETTINGS (Version 18.0)
+# ============================================================
+ENABLE_IMM_FILTER = True                # Bật bộ lọc IMM cao cấp thay thế cho Kalman 3D đơn
+# Ma trận chuyển đổi xác suất giữa các mô hình (M1: CV, M2: Stop)
+# IMM_TRANSITION_MATRIX[i][j] là xác suất chuyển từ mô hình i sang mô hình j
+# Mặc định: xác suất ở lại CV là 0.92, sang Stop là 0.08. Xác suất ở lại Stop là 0.88, sang CV là 0.12.
+IMM_TRANSITION_MATRIX = [
+    [0.92, 0.08],
+    [0.12, 0.88]
+]
+
+# ============================================================
+# HUNGARIAN DATA ASSOCIATION SETTINGS (Version 18.0)
+# ============================================================
+ENABLE_HUNGARIAN_ASSOCIATION = True     # Bật bộ gán cặp Hungarian toàn cục tối ưu
+HUNGARIAN_DIST_WEIGHT = 0.70            # Trọng số khoảng cách 3D Euclidean trong ma trận chi phí
+HUNGARIAN_VEL_WEIGHT = 0.20             # Trọng số sai biệt vận tốc tức thời
+HUNGARIAN_MAHALANOBIS_WEIGHT = 0.10     # Trọng số khoảng cách Mahalanobis sai số cải tiến
+
 

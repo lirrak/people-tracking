@@ -18,6 +18,7 @@ from filters import TrackHistory, GhostTargetFilter
 from pointcloud_processing import VirtualTargetTracker, HAS_SKLEARN, TemporalPointCloudStabilizer
 from visualization import setup_3d_plot, update_3d_plot
 from sync_recorder import SyncRecorder
+from pointcloud_logger import PointCloudLogger
 
 
 # ============================================================
@@ -81,9 +82,13 @@ def main():
     )
     virtual_tracker = VirtualTargetTracker()
 
-    # Khởi tạo bộ ghi hình đồng bộ (Version 11.0)
+    # Khởi tạo bộ ghi hình và log thông số (Version 17.0)
     recorder = SyncRecorder()
     recorder.start()
+
+    pc_logger = None
+    if ENABLE_POINTCLOUD_LOG:
+        pc_logger = PointCloudLogger()
 
     fig, ax = setup_3d_plot()
 
@@ -172,6 +177,17 @@ def main():
 
                 track_history.update(targets)
 
+                # LOG THÔNG SỐ POINT CLOUD (Version 17.0)
+                if pc_logger is not None:
+                    pc_logger.log_frame(
+                        frame_number=frame_number,
+                        raw_pc=point_cloud,
+                        stable_pc=point_cloud_for_detection,
+                        display_pc=display_point_cloud,
+                        targets=targets,
+                        presence=presence
+                    )
+
                 print(
                     f"Frame {frame_number} | "
                     f"Mode: {mode} | "
@@ -216,6 +232,10 @@ def main():
 
                     if target.get("ghostFiltered", False):
                         support_note += f" | missing_frames={target.get('missingFrames', 0)}"
+
+                    if "immMu" in target:
+                        mu = target["immMu"]
+                        support_note += f" | IMM Prob [CV: {mu[0]*100:.0f}%, STOP: {mu[1]*100:.0f}%]"
 
                     print(
                         f"  ID {target['tid']} | "
@@ -309,7 +329,7 @@ def main():
                     parser_status=parser_status
                 )
 
-                # GHI VIDEO SIDE-BY-SIDE (Version 11.0)
+                # GHI VIDEO GIAO DIỆN PHẦN MỀM (Version 17.0)
                 if recorder.enabled:
                     try:
                         # Trích xuất trực tiếp ảnh RGB từ bộ đệm đồ họa Matplotlib
@@ -340,9 +360,16 @@ def main():
         print(f"[ERROR] Unexpected error: {e}")
 
     finally:
-        # Dừng webcam và lưu video an toàn (Version 11.0)
+        # Dừng và lưu dữ liệu log / video an toàn (Version 17.0)
         try:
-            recorder.stop()
+            if 'pc_logger' in locals() and pc_logger is not None:
+                pc_logger.close()
+        except Exception as log_err:
+            print(f"[WARNING] Error closing logger: {log_err}")
+
+        try:
+            if 'recorder' in locals() and recorder is not None:
+                recorder.stop()
         except Exception as stop_err:
             print(f"[WARNING] Error stopping recorder: {stop_err}")
 

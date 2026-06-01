@@ -24,6 +24,173 @@ except Exception:
     SklearnDBSCAN = None
     HAS_SKLEARN = False
 
+try:
+    from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
+    HAS_SCIPY = True
+except Exception:
+    scipy_linear_sum_assignment = None
+    HAS_SCIPY = False
+
+def numpy_linear_sum_assignment(cost_matrix):
+    """
+    Bản triển khai Kuhn-Munkres (Hungarian) hoàn toàn bằng pure-NumPy.
+    Tìm gán ghép cặp tối ưu toàn cục với tổng chi phí nhỏ nhất.
+    """
+    cost_matrix = np.atleast_2d(cost_matrix).astype(float)
+    h, w = cost_matrix.shape
+    transposed = False
+    if h > w:
+        cost_matrix = cost_matrix.T
+        h, w = cost_matrix.shape
+        transposed = True
+
+    # 1. Trừ giá trị nhỏ nhất của mỗi hàng/cột
+    C = cost_matrix.copy()
+    for i in range(h):
+        C[i] -= np.min(C[i])
+    for j in range(w):
+        C[:, j] -= np.min(C[:, j])
+
+    # Khởi tạo ma trận đánh dấu (1: Star - gán, 2: Prime - nháp)
+    marked = np.zeros((h, w), dtype=int)
+    row_covered = np.zeros(h, dtype=bool)
+    col_covered = np.zeros(w, dtype=bool)
+
+    # Đánh dấu Star các số không độc lập ban đầu
+    for i in range(h):
+        for j in range(w):
+            if C[i, j] == 0 and not row_covered[i] and not col_covered[j]:
+                marked[i, j] = 1
+                row_covered[i] = True
+                col_covered[j] = True
+
+    row_covered[:] = False
+    col_covered[:] = False
+
+    def clear_covers():
+        row_covered[:] = False
+        col_covered[:] = False
+
+    # Vòng lặp các bước Hungarian
+    while True:
+        # Che phủ các cột chứa Star zero
+        for i in range(h):
+            for j in range(w):
+                if marked[i, j] == 1:
+                    col_covered[j] = True
+
+        # Nếu tất cả các hàng đều có Star (đã che đủ cột), đạt gán tối ưu
+        if np.sum(col_covered) >= h:
+            break
+
+        # Tìm các số không chưa che phủ để gán Prime
+        finished = False
+        while not finished:
+            zero_row, zero_col = -1, -1
+            for i in range(h):
+                if not row_covered[i]:
+                    for j in range(w):
+                        if not col_covered[j] and C[i, j] == 0:
+                            zero_row, zero_col = i, j
+                            break
+                if zero_row != -1:
+                    break
+
+            # Nếu không còn số không chưa bị che phủ, tìm min giá trị chưa che phủ để điều chỉnh
+            if zero_row == -1:
+                min_val = np.inf
+                for i in range(h):
+                    if not row_covered[i]:
+                        for j in range(w):
+                            if not col_covered[j] and C[i, j] < min_val:
+                                min_val = C[i, j]
+
+                if np.isinf(min_val) or min_val == 0:
+                    finished = True
+                    break
+
+                for i in range(h):
+                    if row_covered[i]:
+                        C[i] += min_val
+                for j in range(w):
+                    if not col_covered[j]:
+                        C[:, j] -= min_val
+                continue
+
+            # Đánh dấu Prime số không tìm được
+            marked[zero_row, zero_col] = 2
+
+            # Tìm xem hàng này có Star zero nào không
+            star_col = -1
+            for j in range(w):
+                if marked[zero_row, j] == 1:
+                    star_col = j
+                    break
+
+            if star_col != -1:
+                row_covered[zero_row] = True
+                col_covered[star_col] = False
+            else:
+                # Nếu hàng không có Star zero, xây dựng đường đi xen kẽ (Augmenting Path)
+                path = [(zero_row, zero_col)]
+                while True:
+                    # Tìm Star zero trong cột của Prime zero cuối cùng
+                    r_star = -1
+                    c_star = path[-1][1]
+                    for i in range(h):
+                        if marked[i, c_star] == 1:
+                            r_star = i
+                            break
+                    if r_star == -1:
+                        break
+                    path.append((r_star, c_star))
+
+                    # Tìm Prime zero trong hàng của Star zero vừa tìm
+                    c_prime = -1
+                    r_prime = path[-1][0]
+                    for j in range(w):
+                        if marked[r_prime, j] == 2:
+                            c_prime = j
+                            break
+                    path.append((r_prime, c_prime))
+
+                # Đảo ngược dấu: Star -> Unstar, Prime -> Star
+                for r, c in path:
+                    if marked[r, c] == 1:
+                        marked[r, c] = 0
+                    elif marked[r, c] == 2:
+                        marked[r, c] = 1
+
+                marked[marked == 2] = 0
+                clear_covers()
+                break
+
+    # Trích xuất chỉ số gán cặp
+    row_ind, col_ind = [], []
+    for i in range(h):
+        for j in range(w):
+            if marked[i, j] == 1:
+                row_ind.append(i)
+                col_ind.append(j)
+
+    row_ind = np.array(row_ind)
+    col_ind = np.array(col_ind)
+
+    if transposed:
+        return col_ind, row_ind
+    else:
+        return row_ind, col_ind
+
+def linear_sum_assignment(cost_matrix):
+    """Bọc bộ giải Hungarian toàn cục thích ứng tự động."""
+    if HAS_SCIPY:
+        try:
+            return scipy_linear_sum_assignment(cost_matrix)
+        except Exception:
+            pass
+    return numpy_linear_sum_assignment(cost_matrix)
+
+
 
 # ============================================================
 # 3D CONSTANT VELOCITY KALMAN FILTER (Version 8.0)
@@ -97,8 +264,211 @@ class KalmanTracker3D:
 
 
 # ============================================================
+# STATIONARY PEOPLE TRACKING HELPER FUNCTIONS (Version 20.0)
+# ============================================================
+
+def calculate_cluster_doppler_std(cluster_points):
+    """
+    Tính toán độ lệch chuẩn của Doppler (Doppler Variance) trong một cụm.
+    Sử dụng để phát hiện dao động sinh học do nhịp thở (micro-motion) của người đứng yên.
+    """
+    if cluster_points is None or len(cluster_points) == 0:
+        return 0.0
+    # Doppler nằm ở cột thứ 4 (chỉ số 3) của mây điểm [x, y, z, doppler, snr]
+    return float(np.std(cluster_points[:, 3]))
+
+def calculate_breathing_likelihood_boost(doppler_std, base_boost=1.5):
+    """
+    Trả về hệ số nhân khuếch đại cho Stop Model nếu biến thiên Doppler
+    nằm trong khoảng hô hấp sinh học thực tế (0.02 đến 0.09 m/s).
+    """
+    if 0.02 <= doppler_std <= 0.09:
+        return base_boost
+    return 1.0
+
+def apply_zero_velocity_update(state_vector, threshold=0.06):
+    """
+    Áp dụng Zero Velocity Update (ZUPT) để khóa cứng vận tốc về 0.0
+    nếu vận tốc tổng hợp của mục tiêu thấp hơn ngưỡng threshold.
+    """
+    vx, vy, vz = state_vector[3], state_vector[4], state_vector[5]
+    speed = np.sqrt(vx**2 + vy**2 + vz**2)
+    if speed < threshold:
+        state_vector[3:6] = 0.0
+        return True
+    return False
+
+
+# ============================================================
+# 3D INTERACTING MULTIPLE MODEL (IMM) FILTER (Version 18.0)
+# ============================================================
+
+class IMMTracker3D:
+    def __init__(self, init_pos, dt=0.05):
+        self.dt = dt
+        
+        # Model 0: Constant Velocity (CV) - nhiễu hệ thống cao cho vận động chuyển động
+        self.cv_filter = KalmanTracker3D(init_pos, dt)
+        self.cv_filter.q_acc = KALMAN_PROCESS_NOISE_ACC if 'KALMAN_PROCESS_NOISE_ACC' in globals() else 0.20
+        self.cv_filter.update_dt(dt)
+        
+        # Model 1: Stop Model (Zero-Velocity) - nhiễu hệ thống siêu thấp để khóa im vị trí
+        self.stop_filter = KalmanTracker3D(init_pos, dt)
+        self.stop_filter.q_acc = 0.01  # Nhiễu hệ thống cực bé để tránh nhảy rung hộp
+        self.stop_filter.update_dt(dt)
+        
+        # Giảm ảnh hưởng vận tốc của stop filter lên vị trí để chống trôi hoàn toàn
+        self.stop_filter.F[0, 3] = dt * 0.05
+        self.stop_filter.F[1, 4] = dt * 0.05
+        self.stop_filter.F[2, 5] = dt * 0.05
+        self.stop_filter._calc_Q()
+        
+        self.filters = [self.cv_filter, self.stop_filter]
+        
+        # Xác suất ban đầu cho mỗi mô hình [CV, STOP]
+        self.mu = np.array([0.5, 0.5], dtype=np.float32)
+        
+        # Ma trận xác suất chuyển đổi giữa các mô hình (M1: CV, M2: Stop)
+        if 'IMM_TRANSITION_MATRIX' in globals():
+            self.p_trans = np.array(IMM_TRANSITION_MATRIX, dtype=np.float32)
+        else:
+            self.p_trans = np.array([[0.92, 0.08], [0.12, 0.88]], dtype=np.float32)
+            
+        # Trạng thái kết hợp tổng hợp đầu ra (để tương thích ngược với Kalman single)
+        self.x = self.cv_filter.x.copy()
+        self.P = self.cv_filter.P.copy()
+        
+    def update_dt(self, dt):
+        self.dt = dt
+        for f in self.filters:
+            f.update_dt(dt)
+        
+        # Khóa chặn thêm ma trận F của Stop filter
+        self.stop_filter.F[0, 3] = dt * 0.05
+        self.stop_filter.F[1, 4] = dt * 0.05
+        self.stop_filter.F[2, 5] = dt * 0.05
+        self.stop_filter._calc_Q()
+        
+    def predict(self):
+        # 1. IMM Interaction (Mixing)
+        # Normalization factor: c_j = sum_{i} p_ij * mu_i
+        c = np.dot(self.p_trans.T, self.mu)
+        c = np.where(c < 1e-5, 1e-5, c)
+        
+        # Mixing probability: mu_{i|j} = p_ij * mu_i / c_j
+        mu_mix = np.zeros((2, 2), dtype=np.float32)
+        for j in range(2):
+            mu_mix[:, j] = self.p_trans[:, j] * self.mu / c[j]
+            
+        # Trộn các trạng thái x0 và P0
+        x_mixed = []
+        P_mixed = []
+        
+        for j in range(2):
+            xj = np.zeros(6, dtype=np.float32)
+            for i in range(2):
+                xj += mu_mix[i, j] * self.filters[i].x
+            x_mixed.append(xj)
+            
+            Pj = np.zeros((6, 6), dtype=np.float32)
+            for i in range(2):
+                diff = self.filters[i].x - xj
+                Pj += mu_mix[i, j] * (self.filters[i].P + np.outer(diff, diff))
+            P_mixed.append(Pj)
+            
+        # Cập nhật trạng thái trộn trước khi chạy Predict
+        for j in range(2):
+            self.filters[j].x = x_mixed[j]
+            self.filters[j].P = P_mixed[j]
+            
+        # 2. Dự báo song song (Prediction)
+        for f in self.filters:
+            f.predict()
+            
+        # Kết hợp trạng thái dự báo chung
+        self.x = np.zeros(6, dtype=np.float32)
+        for j in range(2):
+            self.x += c[j] * self.filters[j].x
+            
+        self.P = np.zeros((6, 6), dtype=np.float32)
+        for j in range(2):
+            diff = self.filters[j].x - self.x
+            self.P += c[j] * (self.filters[j].P + np.outer(diff, diff))
+            
+        return self.x[:3]
+        
+    def update(self, measurement, doppler_std=None):
+        z = np.array(measurement, dtype=np.float32)
+        likelihood = np.zeros(2, dtype=np.float32)
+        
+        # 3. Cập nhật song song từng Kalman & tính Likelihood Gaussian
+        for j in range(2):
+            H = self.filters[j].H
+            R = self.filters[j].R
+            
+            # Innovation vector: nu = z - H*x
+            nu = z - np.dot(H, self.filters[j].x)
+            
+            # Innovation Covariance: S = H*P*H^T + R
+            S = np.dot(np.dot(H, self.filters[j].P), H.T) + R
+            
+            # Cập nhật Kalman chính thức
+            self.filters[j].update(measurement)
+            
+            # Likelihood L_j = 1/sqrt((2pi)^3 * |S|) * exp(-0.5 * nu^T * S^-1 * nu)
+            det_S = np.linalg.det(S)
+            if det_S < 1e-9:
+                det_S = 1e-9
+                
+            inv_S = np.linalg.inv(S)
+            exponent = -0.5 * np.dot(np.dot(nu.T, inv_S), nu)
+            exponent = np.clip(exponent, -50.0, 0.0) # Tránh tràn số mũ
+            
+            likelihood[j] = (1.0 / np.sqrt(((2.0 * np.pi) ** 3) * det_S)) * np.exp(exponent)
+            
+        # Áp dụng Doppler Variance Breathing Boost cho Stop Model (Model 1) (Version 20.0)
+        if doppler_std is not None:
+            boost_factor = calculate_breathing_likelihood_boost(doppler_std)
+            likelihood[1] *= boost_factor
+            
+        # 4. Cập nhật xác suất mô hình (Probability Update)
+        c = np.dot(self.p_trans.T, self.mu)
+        c = np.where(c < 1e-5, 1e-5, c)
+        
+        numerator = c * likelihood
+        sum_numerator = np.sum(numerator)
+        
+        if sum_numerator > 1e-15:
+            self.mu = numerator / sum_numerator
+        else:
+            self.mu = c / np.sum(c)
+            
+        # Giới hạn mu trong dải an toàn để phản ứng nhanh, tránh bão hòa mô hình
+        self.mu = np.clip(self.mu, 0.01, 0.99)
+        self.mu /= np.sum(self.mu)
+        
+        # 5. Kết hợp trạng thái tổng hợp đầu ra (Combination)
+        self.x = np.zeros(6, dtype=np.float32)
+        for j in range(2):
+            self.x += self.mu[j] * self.filters[j].x
+            
+        # Áp dụng ZUPT (Zero Velocity Update) để khóa trôi dạt vận tốc (Version 20.0)
+        if apply_zero_velocity_update(self.x):
+            for f in self.filters:
+                apply_zero_velocity_update(f.x)
+            
+        self.P = np.zeros((6, 6), dtype=np.float32)
+        for j in range(2):
+            diff = self.filters[j].x - self.x
+            self.P += self.mu[j] * (self.filters[j].P + np.outer(diff, diff))
+            
+        return self.x
+
+
+# ============================================================
 # SMALL HELPERS
 # ============================================================
+
 
 def empty_point_cloud():
     return np.empty((0, 5), dtype=np.float32)
@@ -201,6 +571,15 @@ def build_human_point_mask(points, confirmed_track_positions=[]):
     if len(points) == 0:
         return np.zeros((0,), dtype=bool)
 
+    # Chuẩn hóa danh sách bảo vệ: chấp nhận cả [pos] và [(pos, radius)] (Version 22.0)
+    normalized_tracks = []
+    default_r = STATIC_CLUTTER_POINT_PROTECTION_RADIUS if 'STATIC_CLUTTER_POINT_PROTECTION_RADIUS' in globals() else 1.2
+    for item in confirmed_track_positions:
+        if isinstance(item, tuple) and len(item) == 2 and not isinstance(item[0], (int, float, np.floating)):
+            normalized_tracks.append(item)
+        else:
+            normalized_tracks.append((item, default_r))
+
     x = points[:, 0]
     y = points[:, 1]
     z = points[:, 2]
@@ -245,10 +624,10 @@ def build_human_point_mask(points, confirmed_track_positions=[]):
             else:
                 min_snr_limit = MIN_POINT_SNR
 
-            if (ENABLE_MICRO_MOTION_ZONE if 'ENABLE_MICRO_MOTION_ZONE' in globals() else True) and len(confirmed_track_positions) > 0:
+            if (ENABLE_MICRO_MOTION_ZONE if 'ENABLE_MICRO_MOTION_ZONE' in globals() else True) and len(normalized_tracks) > 0:
                 in_protection_zone = np.zeros(len(points), dtype=bool)
                 prot_r = MICRO_MOTION_ZONE_RADIUS if 'MICRO_MOTION_ZONE_RADIUS' in globals() else 0.80
-                for track_pos in confirmed_track_positions:
+                for track_pos, _ in normalized_tracks:
                     dist_xy = np.sqrt((x - track_pos[0])**2 + (y - track_pos[1])**2)
                     in_protection_zone |= (dist_xy <= prot_r)
                 
@@ -265,15 +644,15 @@ def build_human_point_mask(points, confirmed_track_positions=[]):
     if ENABLE_DOPPLER_OUTLIER_FILTER:
         mask &= np.abs(doppler) <= MAX_ABS_DOPPLER
 
-    # Doppler static clutter suppression at point level
+    # Doppler static clutter suppression at point level (Version 22.0 - Adaptive radius per track)
     if ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER if 'ENABLE_POINT_LEVEL_STATIC_CLUTTER_FILTER' in globals() else True:
-        near_zero_doppler = np.abs(doppler) < 0.05
-        if len(confirmed_track_positions) > 0 and np.any(near_zero_doppler):
+        dop_thresh = STATIC_CLUTTER_POINT_DOPPLER_THRESHOLD if 'STATIC_CLUTTER_POINT_DOPPLER_THRESHOLD' in globals() else 0.015
+        near_zero_doppler = np.abs(doppler) < dop_thresh
+        if len(normalized_tracks) > 0 and np.any(near_zero_doppler):
             keep_static_point = np.zeros(len(points), dtype=bool)
-            prot_r = STATIC_CLUTTER_POINT_PROTECTION_RADIUS if 'STATIC_CLUTTER_POINT_PROTECTION_RADIUS' in globals() else 1.0
-            for track_pos in confirmed_track_positions:
+            for track_pos, custom_r in normalized_tracks:
                 dist_xy = np.sqrt((x - track_pos[0])**2 + (y - track_pos[1])**2)
-                keep_static_point |= (dist_xy <= prot_r)
+                keep_static_point |= (dist_xy <= custom_r)
             mask &= (~near_zero_doppler | keep_static_point)
         elif np.any(near_zero_doppler):
             mask &= ~near_zero_doppler
@@ -657,9 +1036,79 @@ def target_xy_distance(target_a, target_b):
     return float(np.sqrt((ax - bx) ** 2 + (ay - by) ** 2))
 
 
+def profile_target_posture(cluster):
+    """
+    Phân tích tư thế con người (Đứng, Ngồi, Nằm/Ngã sàn) dọc trục Z của mây điểm.
+    Chạy ở chế độ hiển thị thử nghiệm trên đồ thị 3D.
+    """
+    cluster = ensure_point_cloud_shape(cluster)
+    if len(cluster) == 0:
+        return "STANDING"
+        
+    z = cluster[:, 2]
+    x = cluster[:, 0]
+    y = cluster[:, 1]
+    
+    min_z = float(np.min(z))
+    max_z = float(np.max(z))
+    
+    # Tính toán phân tán ngang (width X, depth Y)
+    width_x = float(np.max(x) - np.min(x)) if len(cluster) > 1 else 0.0
+    depth_y = float(np.max(y) - np.min(y)) if len(cluster) > 1 else 0.0
+    horizontal_spread = max(width_x, depth_y)
+    
+    # Chia cụm điểm thành 3 phân vùng dọc trục Z:
+    # 1. Lower Zone: 0.15m -> 0.60m (Chân/Sàn)
+    # 2. Middle Zone: 0.60m -> 1.20m (Bụng/Thân)
+    # 3. Upper Zone: 1.20m -> 2.20m (Ngực/Đầu)
+    lower_mask = (z >= 0.15) & (z < 0.60)
+    middle_mask = (z >= 0.60) & (z < 1.20)
+    upper_mask = (z >= 1.20) & (z <= 2.20)
+    
+    lower_pts = cluster[lower_mask]
+    middle_pts = cluster[middle_mask]
+    upper_pts = cluster[upper_mask]
+    
+    lower_count = len(lower_pts)
+    middle_count = len(middle_pts)
+    upper_count = len(upper_pts)
+    total_count = len(cluster)
+    
+    # 1. Thử nghiệm tư thế Nằm/Ngã (LYING/FALLEN):
+    # Đa phần điểm mây bẹt dưới thấp Z < 0.60m và dải phân bố ngang rộng > 0.85m
+    if (lower_count / total_count > 0.85 or max_z < 0.70) and horizontal_spread > 0.85:
+        return "LYING/FALLEN"
+        
+    # 2. Thử nghiệm tư thế Ngồi (SITTING):
+    # Cụm điểm chủ yếu ở phân vùng thấp & giữa, rỗng phần cao và chiều cao tối đa trung bình [0.60m - 1.30m]
+    if 0.60 <= max_z < 1.30 and upper_count / total_count < 0.10:
+        return "SITTING"
+        
+    # 3. Thử nghiệm tư thế Đứng (STANDING):
+    # Chiều cao cao (>1.30m) và mây điểm thẳng đứng tương đối chặt chẽ
+    if max_z >= 1.30:
+        if lower_count >= 2 and middle_count >= 2 and upper_count >= 1:
+            lower_center = np.mean(lower_pts[:, 0:2], axis=0)
+            middle_center = np.mean(middle_pts[:, 0:2], axis=0)
+            upper_center = np.mean(upper_pts[:, 0:2], axis=0)
+            
+            # Tính độ lệch trục đứng giữa các phân vùng
+            dev_low_mid = np.sqrt(np.sum((lower_center - middle_center)**2))
+            dev_mid_up = np.sqrt(np.sum((middle_center - upper_center)**2))
+            
+            if max(dev_low_mid, dev_mid_up) < 0.45:
+                return "STANDING"
+            else:
+                return "SITTING"
+        return "STANDING"
+        
+    return "STANDING"
+
+
 def cluster_to_virtual_target(cluster, cluster_id):
     center = np.mean(cluster[:, 0:3], axis=0)
     score, features = score_human_cluster(cluster)
+    posture = profile_target_posture(cluster)
 
     return {
         "tid": int(VIRTUAL_TARGET_ID_BASE + cluster_id),
@@ -677,6 +1126,7 @@ def cluster_to_virtual_target(cluster, cluster_id):
         "supportPointCount": int(len(cluster)),
         "humanScore": score,
         "clusterFeatures": features,
+        "posture": posture,
     }
 
 
@@ -1033,17 +1483,21 @@ def suppress_multipath_ghosts(candidates):
 class VirtualTargetTracker:
     """
     Stateful tracker cho các target ảo sinh ra từ Point Cloud.
-    Giải quyết triệt để lỗi nhảy ID ngẫu nhiên của DBSCAN, tích hợp bộ lọc 3D Kalman và quản lý trạng thái.
+    Giải quyết triệt để lỗi nhảy ID ngẫu nhiên của DBSCAN, tích hợp bộ lọc 3D IMM/Kalman và quản lý trạng thái.
     """
     def __init__(self):
         self.next_virtual_id = VIRTUAL_TARGET_ID_BASE # 1000
-        self.active_tracks = {} # tid -> { "kalman": KalmanTracker3D, "state": "tentative"|"confirmed", "hit_count": int, "miss_count": int, "features": dict }
+        self.active_tracks = {} # tid -> { "kalman": IMMTracker3D|KalmanTracker3D, "state": "tentative"|"confirmed", "hit_count": int, "miss_count": int, "features": dict }
         self.last_time = None
+        self.track_motion_history = {} # tid -> has_moved (bool) (Version 24.0)
+        self.hw_track_scores = {} # tid -> last_human_score (float) (Version 24.0)
 
     def reset(self):
         self.next_virtual_id = VIRTUAL_TARGET_ID_BASE
         self.active_tracks.clear()
         self.last_time = None
+        self.track_motion_history.clear()
+        self.hw_track_scores.clear()
 
     def track_and_build(self, raw_targets, point_cloud, target_index=None, frame_number=0):
         # 1) Tính toán dt thực tế giữa các frame
@@ -1060,17 +1514,58 @@ class VirtualTargetTracker:
         point_cloud = transform_to_room_coordinates(point_cloud)
         raw_targets = [transform_target_to_room_coordinates(t) for t in raw_targets]
 
-        # Lấy danh sách vị trí confirmed tracks để bảo vệ điểm tĩnh
-        confirmed_positions = [
-            track_info["kalman"].x[:2] 
-            for track_info in self.active_tracks.values() 
-            if track_info["state"] == "confirmed"
-        ]
+        # Quyết định cổng bảo vệ thích nghi dựa trên Dynamic State Locking (v24.0)
+        confirmed_positions = []
         
-        # Thêm các target phần cứng vào danh sách vị trí đã xác nhận để bảo vệ điểm tĩnh (Version 14.0)
+        # A. Xử lý Virtual Tracks
+        for tid, track_info in self.active_tracks.items():
+            if track_info["state"] == "confirmed":
+                k_state = track_info["kalman"].x
+                pos = k_state[:2]
+                speed = np.sqrt(k_state[3]**2 + k_state[4]**2 + k_state[5]**2)
+                score = track_info.get("score", 0.0)
+                
+                # Cập nhật và lưu giữ trạng thái đã từng di chuyển
+                if speed >= 0.15:
+                    self.track_motion_history[tid] = True
+                
+                has_moved = self.track_motion_history.get(tid, False)
+                is_confident_human = has_moved or (score > 40.0)
+                
+                # Quyết định bán kính bảo vệ điểm tĩnh
+                if speed >= 0.15:
+                    r_prot = 0.85
+                    confirmed_positions.append((pos, r_prot))
+                elif is_confident_human:
+                    r_prot = 0.45
+                    confirmed_positions.append((pos, r_prot))
+                else:
+                    # Đóng cổng bảo vệ cho vật thể tĩnh hoặc không đáng tin cậy
+                    pass
+                    
+        # B. Xử lý Hardware Raw Targets
         for target in raw_targets:
             if "posX" in target and "posY" in target:
-                confirmed_positions.append(np.array([target["posX"], target["posY"]], dtype=np.float32))
+                tid = target.get("tid", -1)
+                vx = target.get("velX", 0.0)
+                vy = target.get("velY", 0.0)
+                vz = target.get("velZ", 0.0)
+                speed = np.sqrt(vx**2 + vy**2 + vz**2)
+                score = self.hw_track_scores.get(tid, 0.0)
+                pos = np.array([target["posX"], target["posY"]], dtype=np.float32)
+                
+                if speed >= 0.15:
+                    self.track_motion_history[tid] = True
+                    
+                has_moved = self.track_motion_history.get(tid, False)
+                is_confident_human = has_moved or (score > 40.0)
+                
+                if speed >= 0.15:
+                    r_prot = 0.85
+                    confirmed_positions.append((pos, r_prot))
+                elif is_confident_human:
+                    r_prot = 0.45
+                    confirmed_positions.append((pos, r_prot))
 
 
         point_cloud = ensure_point_cloud_shape(point_cloud)
@@ -1080,6 +1575,7 @@ class VirtualTargetTracker:
 
         final_targets = []
         cluster_debug = []
+        current_frame_tids = set() # (Version 24.0)
 
         # 2) Đánh giá và lọc target phần cứng (Firmware Targets)
         for target in raw_targets:
@@ -1104,15 +1600,24 @@ class VirtualTargetTracker:
                 target["radiusSupportUsed"] = False
 
             score, features = score_human_cluster(associated_points)
+            
+            # Tính toán biến động Doppler của cụm độc lập cho target phần cứng (Version 20.0)
+            doppler_std = calculate_cluster_doppler_std(associated_points)
+            features["doppler_std"] = doppler_std
+            
             target["supportPointCount"] = int(len(associated_points))
             target["humanScore"] = score
             target["clusterFeatures"] = features
             target["source"] = "firmware_target"
 
+            # Lưu thông tin độ tin cậy và theo dõi ID phần cứng (Version 24.0)
+            self.hw_track_scores[tid] = score
+            current_frame_tids.add(tid)
+
             if score >= HUMAN_SCORE_TARGET_THRESHOLD or len(associated_points) >= GHOST_MIN_SUPPORT_POINTS:
                 final_targets.append(target)
 
-        # 3) Dự báo trạng thái Kalman (Kalman Predict Step)
+        # 3) Dự báo trạng thái Kalman/IMM (Predict Step)
         predictions = {}
         for tid, track_info in self.active_tracks.items():
             track_info["kalman"].update_dt(dt)
@@ -1133,6 +1638,10 @@ class VirtualTargetTracker:
         for cid, cluster in enumerate(merged_clusters):
             score, features = score_human_cluster(cluster)
             cluster_center = np.mean(cluster[:, 0:3], axis=0)
+            
+            # Tính toán biến động Doppler của cụm độc lập (Version 20.0)
+            doppler_std = calculate_cluster_doppler_std(cluster)
+            features["doppler_std"] = doppler_std
 
             cluster_debug.append({
                 "cluster_id": cid,
@@ -1157,43 +1666,111 @@ class VirtualTargetTracker:
             valid_features.append(features)
             valid_counts.append(len(cluster))
 
-        # 5) Data Association dựa trên Nearest Neighbor so với Prediction
+        # 5) Data Association sử dụng Hungarian tối ưu toàn cục (hoặc GNN fallback)
         matched_cluster_indices = set()
         matched_tids = set()
         assignments = {}
 
-        if self.active_tracks and valid_centroids:
-            pairs = []
-            for c_idx, cc in enumerate(valid_centroids):
-                for tid, pred_pos in predictions.items():
-                    dist_xy = float(np.sqrt((cc[0] - pred_pos[0])**2 + (cc[1] - pred_pos[1])**2))
-                    pairs.append((dist_xy, c_idx, tid))
-            
-            pairs.sort(key=lambda x: x[0])
-            assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS
-            
-            for dist_xy, c_idx, tid in pairs:
-                if c_idx not in matched_cluster_indices and tid not in matched_tids:
-                    if dist_xy <= assoc_radius:
-                        matched_cluster_indices.add(c_idx)
-                        matched_tids.add(tid)
-                        assignments[c_idx] = tid
+        use_hungarian = ENABLE_HUNGARIAN_ASSOCIATION if 'ENABLE_HUNGARIAN_ASSOCIATION' in globals() else True
 
-        # 6) Tạo mới hoặc cập nhật bộ lọc Kalman (Update Step)
+        if self.active_tracks and valid_centroids:
+            if use_hungarian:
+                track_tids = list(self.active_tracks.keys())
+                num_tracks = len(track_tids)
+                num_centroids = len(valid_centroids)
+                
+                # Khởi tạo ma trận chi phí
+                cost_matrix = np.zeros((num_tracks, num_centroids), dtype=np.float32)
+                
+                w_dist = HUNGARIAN_DIST_WEIGHT if 'HUNGARIAN_DIST_WEIGHT' in globals() else 0.70
+                w_vel = HUNGARIAN_VEL_WEIGHT if 'HUNGARIAN_VEL_WEIGHT' in globals() else 0.20
+                w_maha = HUNGARIAN_MAHALANOBIS_WEIGHT if 'HUNGARIAN_MAHALANOBIS_WEIGHT' in globals() else 0.10
+                
+                for i, tid in enumerate(track_tids):
+                    track_info = self.active_tracks[tid]
+                    pred_pos = predictions[tid]
+                    
+                    for j, cc in enumerate(valid_centroids):
+                        # a. Khoảng cách hình học 3D Euclidean
+                        dist_3d = float(np.sqrt(np.sum((cc - pred_pos)**2)))
+                        
+                        # b. Trọng số sai lệch vận tốc dự kiến (expected displacement vs displacement)
+                        t_vel = track_info["kalman"].x[3:6]
+                        prev_pos = track_info["kalman"].x[:3]
+                        est_displacement = cc - prev_pos
+                        expected_displacement = t_vel * dt
+                        vel_diff = float(np.sqrt(np.sum((est_displacement - expected_displacement)**2)))
+                        
+                        # c. Khoảng cách Mahalanobis sử dụng Innovation Covariance S của bộ lọc
+                        nu = cc - pred_pos[:3]
+                        P_pos = track_info["kalman"].P[:3, :3]
+                        R = track_info["kalman"].filters[0].R if isinstance(track_info["kalman"], IMMTracker3D) else track_info["kalman"].R
+                        S = P_pos + R
+                        try:
+                            inv_S = np.linalg.inv(S)
+                            maha_dist = float(np.sqrt(np.dot(np.dot(nu.T, inv_S), nu)))
+                        except Exception:
+                            maha_dist = dist_3d
+                            
+                        cost_matrix[i, j] = w_dist * dist_3d + w_vel * vel_diff + w_maha * maha_dist
+                
+                # Giải thuật Hungarian optimal assignment
+                row_ind, col_ind = linear_sum_assignment(cost_matrix)
+                assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS
+                
+                for r, c in zip(row_ind, col_ind):
+                    tid = track_tids[r]
+                    cc = valid_centroids[c]
+                    pred_pos = predictions[tid]
+                    dist_xy = float(np.sqrt((cc[0] - pred_pos[0])**2 + (cc[1] - pred_pos[1])**2))
+                    
+                    if dist_xy <= assoc_radius:
+                        matched_cluster_indices.add(c)
+                        matched_tids.add(tid)
+                        assignments[c] = tid
+            else:
+                # Fallback GNN: Nearest Neighbor tham lam giống version cũ
+                pairs = []
+                for c_idx, cc in enumerate(valid_centroids):
+                    for tid, pred_pos in predictions.items():
+                        dist_xy = float(np.sqrt((cc[0] - pred_pos[0])**2 + (cc[1] - pred_pos[1])**2))
+                        pairs.append((dist_xy, c_idx, tid))
+                
+                pairs.sort(key=lambda x: x[0])
+                assoc_radius = VIRTUAL_TRACKER_ASSOCIATION_RADIUS
+                
+                for dist_xy, c_idx, tid in pairs:
+                    if c_idx not in matched_cluster_indices and tid not in matched_tids:
+                        if dist_xy <= assoc_radius:
+                            matched_cluster_indices.add(c_idx)
+                            matched_tids.add(tid)
+                            assignments[c_idx] = tid
+
+        # 6) Tạo mới hoặc cập nhật bộ lọc IMM/Kalman (Update Step)
         for c_idx, cc in enumerate(valid_centroids):
             score = valid_scores[c_idx]
             features = valid_features[c_idx]
             pt_count = valid_counts[c_idx]
 
+            # Dùng IMM cao cấp nếu bật trong cấu hình
+            use_imm = ENABLE_IMM_FILTER if 'ENABLE_IMM_FILTER' in globals() else True
+
             if c_idx in assignments:
                 tid = assignments[c_idx]
                 track_info = self.active_tracks[tid]
-                track_info["kalman"].update(cc)
+                
+                # Cập nhật IMM / Kalman có kèm theo doppler_std (Version 20.0)
+                dop_std = features.get("doppler_std", 0.0)
+                if isinstance(track_info["kalman"], IMMTracker3D):
+                    track_info["kalman"].update(cc, doppler_std=dop_std)
+                else:
+                    track_info["kalman"].update(cc)
                 track_info["hit_count"] += 1
                 track_info["miss_count"] = 0
                 track_info["score"] = score
                 track_info["features"] = features
                 track_info["pt_count"] = pt_count
+                track_info["posture"] = profile_target_posture(merged_clusters[c_idx])
                 
                 # Nâng cấp lên confirmed nếu đủ số frame tích lũy
                 if track_info["state"] == "tentative" and track_info["hit_count"] >= TARGET_CONFIRM_FRAMES:
@@ -1202,16 +1779,19 @@ class VirtualTargetTracker:
                 tid = self.next_virtual_id
                 self.next_virtual_id += 1
                 
+                # Khởi tạo bộ bám vết mới tùy theo cấu hình IMM/Kalman
+                tracker_obj = IMMTracker3D(cc, dt) if use_imm else KalmanTracker3D(cc, dt)
+                
                 self.active_tracks[tid] = {
-                    "kalman": KalmanTracker3D(cc, dt),
+                    "kalman": tracker_obj,
                     "state": "tentative",
                     "hit_count": 1,
                     "miss_count": 0,
                     "features": features,
                     "score": score,
-                    "pt_count": pt_count
+                    "pt_count": pt_count,
+                    "posture": profile_target_posture(merged_clusters[c_idx])
                 }
-
 
         # 7) Quản lý các track bị mất tích (Dead Reckoning & Deletion)
         for tid in list(self.active_tracks.keys()):
@@ -1257,8 +1837,13 @@ class VirtualTargetTracker:
                 "supportPointCount": int(track_info["pt_count"]),
                 "humanScore": float(track_info["score"]),
                 "clusterFeatures": track_info["features"],
-                "kalmanTracked": True
+                "kalmanTracked": True,
+                "posture": track_info.get("posture", "STANDING")
             }
+
+            # Đính kèm xác suất mô hình IMM phục vụ log/debug bên ngoài nếu dùng IMM
+            if isinstance(track_info["kalman"], IMMTracker3D):
+                virtual_target["immMu"] = [float(val) for val in track_info["kalman"].mu]
 
             # Lọc chống gộp trùng với target phần cứng
             too_close_to_existing = False
@@ -1281,10 +1866,19 @@ class VirtualTargetTracker:
         # Triệt tiêu các Ghost Target dội sóng gương qua tường
         final_targets = suppress_multipath_ghosts(final_targets)
         
-        final_targets.sort(key=lambda t: t.get("tid", 0))
+        # Dọn dẹp trạng thái các track đã biến mất hoàn toàn (Version 24.0)
+        active_tids = set(self.active_tracks.keys()) | current_frame_tids
+        for tid in list(self.track_motion_history.keys()):
+            if tid not in active_tids:
+                self.track_motion_history.pop(tid, None)
+        for tid in list(self.hw_track_scores.keys()):
+            if tid not in active_tids:
+                self.hw_track_scores.pop(tid, None)
 
+        final_targets.sort(key=lambda t: t.get("tid", 0))
         display_point_cloud = roi_points if SHOW_FILTERED_POINT_CLOUD_ONLY else point_cloud
 
         return final_targets, display_point_cloud, cluster_debug
+
 
 

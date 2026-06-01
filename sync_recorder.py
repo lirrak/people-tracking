@@ -94,14 +94,13 @@ class SyncRecorder:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.output_path = os.path.join(RECORD_OUTPUT_DIR, f"radar_webcam_sync_{timestamp}.mp4")
             
-            # Kích thước khung hình Side-by-Side:
-            # Webcam: 640 x 480
-            # 3D Matplotlib: Resize về 640 x 480 để cân đối
-            # Tổng chiều rộng = 640 + 640 = 1280, Chiều cao = 480
-            # Sử dụng codec 'mp4v' cho file MP4
+            # Kích thước khung hình ghi tùy thuộc có bật webcam hay không
+            width = 1280 if self.webcam_enabled else 640
+            height = 480
+            
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            self.writer = cv2.VideoWriter(self.output_path, fourcc, RECORD_FPS, (1280, 480))
-            print(f"[INFO] Video recording initialized. Saving to: {self.output_path}")
+            self.writer = cv2.VideoWriter(self.output_path, fourcc, RECORD_FPS, (width, height))
+            print(f"[INFO] Video recording initialized (size={width}x{height}). Saving to: {self.output_path}")
 
     def _webcam_loop(self):
         while self.running:
@@ -115,41 +114,48 @@ class SyncRecorder:
         if not self.enabled or self.writer is None:
             return
 
-        # 1. Chuẩn bị ảnh Webcam (Trái)
-        if self.webcam_enabled and self.webcam_frame is not None:
-            webcam_part = self.webcam_frame.copy()
-        else:
-            # Nếu không có webcam, tạo khung nền đen
-            webcam_part = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(webcam_part, "Webcam Disabled/Unavailable", (50, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        # Đảm bảo ảnh webcam đúng kích thước 640x480
-        webcam_part = cv2.resize(webcam_part, (640, 480))
-
-        # 2. Chuẩn bị ảnh Matplotlib 3D Plot (Phải)
-        # plot_img nhận vào là RGB từ matplotlib buffer
         # Đổi định dạng từ RGB sang BGR để OpenCV ghi chính xác
         plot_bgr = cv2.cvtColor(plot_img, cv2.COLOR_RGB2BGR)
         plot_part = cv2.resize(plot_bgr, (640, 480))
 
-        # 3. Ghép Side-by-Side
-        combined_frame = np.hstack((webcam_part, plot_part))
+        if self.webcam_enabled:
+            # 1. Chuẩn bị ảnh Webcam (Trái)
+            if self.webcam_frame is not None:
+                webcam_part = self.webcam_frame.copy()
+            else:
+                webcam_part = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(webcam_part, "Webcam Disabled/Unavailable", (50, 240),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            webcam_part = cv2.resize(webcam_part, (640, 480))
 
-        # 4. Vẽ Header/Thông tin đồng bộ lên Video
-        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        cv2.putText(combined_frame, f"REALITY (WEBCAM) | {timestamp_str}", (15, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(combined_frame, f"RADAR 3D PLOT | Frame: {frame_number}", (655, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # 2. Ghép Side-by-Side
+            combined_frame = np.hstack((webcam_part, plot_part))
 
-        # 5. Ghi vào video
-        self.writer.write(combined_frame)
+            # 3. Vẽ Header/Thông tin đồng bộ lên Video
+            timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            cv2.putText(combined_frame, f"REALITY (WEBCAM) | {timestamp_str}", (15, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(combined_frame, f"RADAR 3D PLOT | Frame: {frame_number}", (655, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # Hiển thị cửa sổ webcam nhỏ chạy song song nếu muốn
-        if self.webcam_enabled and self.webcam_frame is not None:
-            cv2.imshow("Webcam Live Feed (Radar Sync)", self.webcam_frame)
-            cv2.waitKey(1)
+            # 4. Ghi vào video
+            self.writer.write(combined_frame)
+
+            # Hiển thị cửa sổ webcam nhỏ chạy song song nếu muốn
+            if self.webcam_frame is not None:
+                cv2.imshow("Webcam Live Feed (Radar Sync)", self.webcam_frame)
+                cv2.waitKey(1)
+        else:
+            # Chỉ ghi màn hình Matplotlib Radar Plot (Đơn)
+            combined_frame = plot_part.copy()
+
+            # Vẽ Header/Thông tin đồng bộ lên Video đơn
+            timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            cv2.putText(combined_frame, f"RADAR 3D PLOT | Frame: {frame_number} | {timestamp_str}", (15, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # Ghi vào video
+            self.writer.write(combined_frame)
 
     def stop(self):
         self.running = False

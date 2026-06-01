@@ -167,6 +167,7 @@ class GhostTargetFilter:
         self.last_target_state = {}  # Lưu trữ trạng thái cuối cùng của target đã confirm
         self.history_positions = {}  # Lưu trữ lịch sử vị trí cho lọc tĩnh vật toàn diện (Version 16.0)
         self.last_alpha = {}         # Lưu trữ hệ số alpha làm mịn chuyển động (Version 16.0)
+        self.max_speed_history = {} # Lưu trữ tốc độ tối đa của từng ID kể từ lúc sinh ra (Version 24.0)
 
     def reset(self):
         self.missing_count.clear()
@@ -176,6 +177,7 @@ class GhostTargetFilter:
         self.last_target_state.clear()
         self.history_positions.clear()
         self.last_alpha.clear()
+        self.max_speed_history.clear()
 
 
     def count_support_points(self, target, point_cloud):
@@ -398,6 +400,12 @@ class GhostTargetFilter:
 
             # Lọc tĩnh vật toàn diện dựa trên độ lệch chuẩn vị trí (Version 16.0)
             is_static = False
+            
+            # Cập nhật lịch sử vận tốc tối đa của Track (Version 24.0)
+            current_speed = self.target_speed(target)
+            if current_speed >= 0.15:
+                self.max_speed_history[tid] = max(self.max_speed_history.get(tid, 0.0), current_speed)
+                
             if (ENABLE_STATIC_CLUTTER_FILTER if 'ENABLE_STATIC_CLUTTER_FILTER' in globals() else True):
                 hist = self.history_positions[tid]
                 if len(hist) >= min_frames:
@@ -408,7 +416,13 @@ class GhostTargetFilter:
                     
                     max_std = STATIC_CLUTTER_MAX_STD if 'STATIC_CLUTTER_MAX_STD' in globals() else 0.05
                     if std_xy <= max_std:
-                        is_static = True
+                        # Bỏ qua lọc tĩnh vật nếu đây là người thật dựa trên lịch sử vận tốc và điểm hình học (Version 24.0)
+                        has_moved = self.max_speed_history.get(tid, 0.0) >= 0.15
+                        is_confident_score = (target.get("humanScore", 0.0) > 40.0)
+                        is_human_presence = has_moved or is_confident_score
+                        
+                        if not is_human_presence:
+                            is_static = True
 
             if supported:
                 self.missing_count[tid] = 0
@@ -461,7 +475,13 @@ class GhostTargetFilter:
                             
                             max_std = STATIC_CLUTTER_MAX_STD if 'STATIC_CLUTTER_MAX_STD' in globals() else 0.05
                             if std_xy <= max_std:
-                                is_static = True
+                                # Bỏ qua lọc tĩnh vật nếu đây là người thật dựa trên lịch sử vận tốc và điểm hình học (Version 24.0)
+                                has_moved = self.max_speed_history.get(tid, 0.0) >= 0.15
+                                is_confident_score = (missing_target.get("humanScore", 0.0) > 40.0)
+                                is_human_presence = has_moved or is_confident_score
+                                
+                                if not is_human_presence:
+                                    is_static = True
 
                     if not is_static:
                         filtered_targets.append(missing_target)
@@ -474,6 +494,7 @@ class GhostTargetFilter:
                     self.last_target_state.pop(tid, None)
                     self.history_positions.pop(tid, None)
                     self.last_alpha.pop(tid, None)
+                    self.max_speed_history.pop(tid, None)
 
         # 3) Dọn dẹp trạng thái của các target chưa từng được confirm nhưng đã biến mất khỏi frame hiện tại
         for tid in list(self.confirm_count.keys()):
@@ -484,6 +505,7 @@ class GhostTargetFilter:
                 self.smoothed_position.pop(tid, None)
                 self.history_positions.pop(tid, None)
                 self.last_alpha.pop(tid, None)
+                self.max_speed_history.pop(tid, None)
 
         # 4) Lọc trùng và sắp xếp
         filtered_targets = self.remove_duplicates(filtered_targets)
@@ -504,6 +526,7 @@ class GhostTargetFilter:
                 self.last_target_state.pop(tid, None)
                 self.history_positions.pop(tid, None)
                 self.last_alpha.pop(tid, None)
+                self.max_speed_history.pop(tid, None)
 
         return final_targets
 
