@@ -532,23 +532,19 @@ def transform_target_to_room_coordinates(target):
     if not (ENABLE_COORD_TRANSFORM if 'ENABLE_COORD_TRANSFORM' in globals() else False):
         return target
         
-    theta_deg = RADAR_TILT_ANGLE_DEG if 'RADAR_TILT_ANGLE_DEG' in globals() else 30.0
-    h = RADAR_MOUNT_HEIGHT_M if 'RADAR_MOUNT_HEIGHT_M' in globals() else 0.60
-    theta = np.radians(theta_deg)
-    
     transformed = dict(target)
     
-    # Tự động đảo ngược trục X của mục tiêu và vận tốc, gia tốc tương ứng
+    # Tự động đảo ngược trục X của mục tiêu và vận tốc, gia tốc tương ứng (X-flip)
     if FLIP_X_PERSPECTIVE if 'FLIP_X_PERSPECTIVE' in globals() else False:
         transformed["posX"] = -target.get("posX", 0.0)
         transformed["velX"] = -target.get("velX", 0.0)
         transformed["accX"] = -target.get("accX", 0.0)
         
-    y_radar = target.get("posY", 0.0)
-    z_radar = target.get("posZ", 0.0)
-    
-    transformed["posY"] = float(y_radar * np.cos(theta) + z_radar * np.sin(theta))
-    transformed["posZ"] = float(-y_radar * np.sin(theta) + z_radar * np.cos(theta) + h)
+    # Do radar chip đã thực hiện phép xoay tọa độ nghiêng và tịnh tiến chiều cao trực tiếp ở tầng phần cứng
+    # (thông qua lệnh cấu hình động sensorPosition), ta không áp dụng lại phép quay trong Python nữa
+    # để tránh sai lệch xoay kép (double transformation).
+    transformed["posY"] = float(target.get("posY", 0.0))
+    transformed["posZ"] = float(target.get("posZ", 0.0))
     
     return transformed
 

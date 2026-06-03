@@ -1,0 +1,13 @@
+[Unit]
+Description=IWR6843AOP Radar Collector & Serial API Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/iq9/people_tracking
+ExecStart=/usr/bin/python3 -u api_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -405,3 +405,12 @@ HUNGARIAN_VEL_WEIGHT = 0.20             # Trọng số sai biệt vận tốc t�
 HUNGARIAN_MAHALANOBIS_WEIGHT = 0.10     # Trọng số khoảng cách Mahalanobis sai số cải tiến
 
 
+# ============================================================
+# SERIAL API SETTINGS (Version 27.0)
+# ============================================================
+ENABLE_SERIAL_API = True
+API_SERIAL_PORT = "COM15"        # Thay bằng "/dev/ttyUSB2" hoặc "/dev/ttyAMA0" trên Linux IQ9
+API_SERIAL_BAUDRATE = 115200
+
+
+

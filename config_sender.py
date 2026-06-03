@@ -112,8 +112,30 @@ def load_external_config(config_file_path):
 def send_config_lines(cfg_port, config_lines):
     print(f"[INFO] Opening CFG port {cfg_port} at {CFG_BAUDRATE}")
 
-    ser = serial.Serial(cfg_port, CFG_BAUDRATE, timeout=1)
-    time.sleep(0.5)
+    # Mở cổng với các đường bắt tay tắt để tự kiểm soát
+    ser = serial.Serial(cfg_port, CFG_BAUDRATE, timeout=1, dsrdtr=False, rtscts=False)
+    
+    # Thực hiện reset phần cứng qua DTR/RTS (Version 25.0)
+    print("[INFO] Triggering hardware reset (DTR/RTS toggling)...")
+    try:
+        # Kéo reset xuống thấp (DTR & RTS = True làm đầu ra pin vật lý xuống 0V)
+        ser.dtr = True
+        ser.rts = True
+        time.sleep(0.2)
+        
+        # Giải phóng reset (DTR & RTS = False làm đầu ra pin vật lý lên 3.3V)
+        ser.dtr = False
+        ser.rts = False
+        
+        # Đợi 1.0 giây để chip khởi động hoàn tất
+        time.sleep(1.0)
+        
+        # Dọn sạch các bộ đệm cổng nối tiếp
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        print("[INFO] Hardware reset completed successfully.")
+    except Exception as e:
+        print(f"[WARNING] Hardware reset failed: {e}")
 
     print("[INFO] Sending config to radar...")
 
@@ -169,4 +191,28 @@ def send_selected_config():
     print(f"[INFO] Config file: {CONFIG_FILE_PATH}")
 
     config_lines = load_external_config(CONFIG_FILE_PATH)
+    
+    # Tự động ghi đè hoặc chèn câu lệnh sensorPosition động (Version 26.0)
+    # Lấy thông số độ cao lắp đặt và góc nghiêng từ settings.py
+    from settings import RADAR_MOUNT_HEIGHT_M, RADAR_TILT_ANGLE_DEG
+    updated_sensor_pos = False
+    
+    for idx, line in enumerate(config_lines):
+        if line.startswith("sensorPosition"):
+            # Cấu trúc: sensorPosition <height> <azimuthTilt> <elevationTilt>
+            config_lines[idx] = f"sensorPosition {RADAR_MOUNT_HEIGHT_M} 0 {RADAR_TILT_ANGLE_DEG}"
+            print(f"[INFO] Dynamically updated config line to: {config_lines[idx]}")
+            updated_sensor_pos = True
+            break
+            
+    if not updated_sensor_pos:
+        # Nếu chưa có trong tệp cấu hình, chèn vào trước dòng sensorStart
+        insert_idx = len(config_lines) - 1
+        for idx, line in enumerate(config_lines):
+            if line.startswith("sensorStart"):
+                insert_idx = idx
+                break
+        config_lines.insert(insert_idx, f"sensorPosition {RADAR_MOUNT_HEIGHT_M} 0 {RADAR_TILT_ANGLE_DEG}")
+        print(f"[INFO] Dynamically inserted config line: {config_lines[insert_idx]}")
+
     send_config_lines(CFG_PORT, config_lines)
