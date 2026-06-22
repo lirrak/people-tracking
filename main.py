@@ -5,6 +5,11 @@ Run:
     python main.py
 """
 
+import os
+import sys
+# Add src directory to system path to locate moved core modules
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
+
 import time
 import serial
 import numpy as np

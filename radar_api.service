@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/iq9/people_tracking
+WorkingDirectory=/home/ubuntu/sensor/People Tracking
 ExecStart=/usr/bin/python3 -u api_server.py
 Restart=always
 RestartSec=5
